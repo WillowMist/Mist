@@ -20,6 +20,8 @@ async fn connect_request_reaches_the_runtime() {
         env!("CARGO_MANIFEST_DIR").to_string() + "/../target/debug/mist-mock";
     let mut mock = Command::new(&mock_path)
         .env("MOCK_MUD_PORT", port.to_string())
+        // These tests assert on the plain ANSI banner.
+        .env("MOCK_MUD_MODE", "plain")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

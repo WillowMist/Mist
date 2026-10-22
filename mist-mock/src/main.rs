@@ -2,10 +2,10 @@
 //!
 //! Two modes:
 //!
-//! * `MOCK_MUD_MODE=plain` (default): ANSI banner + echo any line, no markup.
+//! * `MOCK_MUD_MODE=plain`: ANSI banner + echo any line, no markup.
 //!   This is the original behaviour.
 //!
-//! * `MOCK_MUD_MODE=pueblo`: emits a full Pueblo-mode intro with `<xch_page>`,
+//! * `MOCK_MUD_MODE=pueblo` (default): emits a full Pueblo-mode intro with `<xch_page>`,
 //!   `<b>`, `<i>`, `<u>`, `<font color>`, `<a xch_cmd>`, `<xch_mudtext>` and
 //!   `<hr>`. The connect handshake reports the `PUEBLO` terminal type (see
 //!   Pueblo/UE 2.61 `ChWConn.cpp:158` — sending `<xch_page clear=text>` once
@@ -24,8 +24,8 @@
 //!
 //! Listens on 127.0.0.1:4000 by default (`MOCK_MUD_PORT`).
 //!
-//! Run with `mist-mock` for plain ANSI banner, or
-//! `MOCK_MUD_MODE=pueblo ./mist-mock` for markup streams.
+//! Run with `./mist-mock` for Pueblo markup, or
+//! `MOCK_MUD_MODE=plain ./mist-mock` for the ANSI banner only.
 
 use std::net::SocketAddr as StdSocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,7 +44,10 @@ async fn main() -> std::io::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(4000);
-    let mode = std::env::var("MOCK_MUD_MODE").unwrap_or_else(|_| "plain".into());
+    // Pueblo markup is the default: it exercises far more of the client
+    // (xch_page, xch_cmd anchors, <img>, font colours) than the plain
+    // banner does. Set MOCK_MUD_MODE=plain for the legacy behaviour.
+    let mode = std::env::var("MOCK_MUD_MODE").unwrap_or_else(|_| "pueblo".into());
     let addr: StdSocketAddr = ([127, 0, 0, 1], port).into();
     let listener = TcpListener::bind(addr).await?;
     eprintln!("mock MUD listening on {addr} (mode={mode})");

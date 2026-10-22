@@ -20,6 +20,8 @@ async fn connect_to_mock_and_echo() {
         + "/../target/debug/mist-mock";
     let mut mock = Command::new(&mock_path)
         .env("MOCK_MUD_PORT", port.to_string())
+        // These tests assert on the plain ANSI banner.
+        .env("MOCK_MUD_MODE", "plain")
         .spawn()
         .expect("spawn mist-mock");
     // Give the mock a beat to bind.
