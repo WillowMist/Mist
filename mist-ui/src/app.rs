@@ -91,8 +91,8 @@ pub struct MistApp {
     pub theme_entries: Vec<crate::palette::ThemeEntry>,
     /// Index into `theme_entries` of the active theme.
     pub theme_index: usize,
-    /// True while the theme picker window is open.
-    pub show_theme_picker: bool,
+    /// True while the preferences window is open.
+    pub show_prefs: bool,
     /// Set when the active theme file failed to load; the previous theme
     /// stays active. See `UI-REQS.md` §1.5.
     pub theme_error: Option<String>,
@@ -152,7 +152,7 @@ impl MistApp {
             palette,
             theme_entries,
             theme_index,
-            show_theme_picker: false,
+            show_prefs: false,
             theme_error,
             connect_pending: false,
             connect_error: None,
@@ -194,13 +194,15 @@ impl MistApp {
         }
     }
 
-    /// The theme picker. Deliberately a separate window rather than a
-    /// dropdown: the swatches are the point, and a dropdown hides them.
-    fn open_theme_picker(&mut self, ctx: &eframe::egui::Context) {
+    /// Preferences. Currently the theme list, but this is where the
+    /// worlds/accounts editor and the login-autodetect toggle will live
+    /// (see UI-REQS.md section 2).
+    fn open_prefs(&mut self, ctx: &eframe::egui::Context) {
         let mut chosen: Option<usize> = None;
         let mut close = false;
+        let mut rescanned = false;
 
-        eframe::egui::Window::new("Theme")
+        eframe::egui::Window::new("Preferences")
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
@@ -209,8 +211,11 @@ impl MistApp {
                     ui.separator();
                 }
 
-                // Built-ins first, then file-backed themes, so the user can
-                // tell which is which without reading paths.
+                ui.label("Theme");
+                ui.separator();
+
+                // Built-ins first, then file-backed themes, so the user
+                // can tell which is which without reading paths.
                 let mut last_builtin: Option<bool> = None;
                 for (i, entry) in self.theme_entries.iter().enumerate() {
                     let is_builtin = entry.is_builtin();
@@ -235,21 +240,24 @@ impl MistApp {
                 }
 
                 ui.separator();
-                ui.label(format!(
-                    "{} of {}",
-                    self.palette.theme.name,
-                    self.theme_entries.len()
-                ));
-                if ui.button("Close").clicked() {
-                    close = true;
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Rescan").clicked() {
+                        rescanned = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
             });
 
         if let Some(i) = chosen {
             self.select_theme(i, ctx);
         }
+        if rescanned {
+            self.refresh_themes();
+        }
         if close {
-            self.show_theme_picker = false;
+            self.show_prefs = false;
         }
     }
 
@@ -699,15 +707,8 @@ impl eframe::App for MistApp {
                     }
                 }
                 if ui.button("Prefs").clicked() {
-                    if let Some(tab) = self.tabs.get_mut(self.active) {
-                        tab.push_line(RenderedLine::from_text("[TODO] preferences"));
-                    }
+                    self.show_prefs = !self.show_prefs;
                 }
-                if ui.button("Theme").clicked() {
-                    self.refresh_themes();
-                    self.show_theme_picker = !self.show_theme_picker;
-                }
-                ui.label(format!("[{}]", self.palette.theme.name));
                 if let Some(tab) = self.tabs.get(self.active) {
                     if tab.connected && ui.button("Disconnect").clicked() {
                         self.runtime.request(DriverRequest::Disconnect { tab_id: tab.id });
@@ -890,8 +891,8 @@ impl eframe::App for MistApp {
         if connect_pending {
             self.open_connect(ctx);
         }
-        if self.show_theme_picker {
-            self.open_theme_picker(ctx);
+        if self.show_prefs {
+            self.open_prefs(ctx);
         }
     }
 

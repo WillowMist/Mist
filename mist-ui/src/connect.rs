@@ -12,6 +12,9 @@ impl Default for ConnectPrompt {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".into(),
+            // Matches `mist-mock`'s own default (MOCK_MUD_PORT), so
+            // launching the mock with no env vars and accepting the
+            // dialog defaults connects. See mist-mock/src/main.rs.
             port: "4000".into(),
         }
     }

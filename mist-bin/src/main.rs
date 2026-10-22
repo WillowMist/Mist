@@ -9,7 +9,14 @@ fn main() -> eframe::Result<()> {
         .init();
 
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("Mist"),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Mist")
+            // Wayland compositors identify windows by app_id. Without it a
+            // client shows up with an empty class, which breaks window
+            // rules, taskbar entries and `hyprctl clients` filtering.
+            .with_app_id("com.wyldware.mist")
+            .with_inner_size([1100.0, 720.0])
+            .with_min_inner_size([640.0, 400.0]),
         ..Default::default()
     };
 
