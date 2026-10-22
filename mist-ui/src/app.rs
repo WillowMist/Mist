@@ -56,6 +56,20 @@ fn load_system_mono_font(ctx: &eframe::egui::Context) -> bool {
     false
 }
 
+/// The `themes/` directory, next to the config file. Watched for changes
+/// per UI-REQS.md 1.5; created on first use so a user can drop a file in.
+fn themes_dir() -> std::path::PathBuf {
+    let dir = match mist_core::profile::config_path() {
+        Ok(cfg) => cfg
+            .parent()
+            .map(|p| p.join("themes"))
+            .unwrap_or_else(|| std::path::PathBuf::from("themes")),
+        Err(_) => std::path::PathBuf::from("themes"),
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 pub struct MistApp {
     pub tabs: Vec<Tab>,
     pub active: usize,
@@ -69,11 +83,62 @@ pub struct MistApp {
     /// Image cache for `<img src="...">` markup. Owned by the egui
     /// thread; the `RuntimeHandle` carries fetch requests across.
     pub images: crate::images::ImageCache,
+
+    /// Active theme. Drives both egui chrome and the world-output paint
+    /// path. See `UI-REQS.md` §1.
+    pub palette: crate::palette::Palette,
+    /// Discovered themes: built-ins first, then files from `themes/`.
+    pub theme_entries: Vec<crate::palette::ThemeEntry>,
+    /// Index into `theme_entries` of the active theme.
+    pub theme_index: usize,
+    /// True while the theme picker window is open.
+    pub show_theme_picker: bool,
+    /// Set when the active theme file failed to load; the previous theme
+    /// stays active. See `UI-REQS.md` §1.5.
+    pub theme_error: Option<String>,
 }
 
 impl MistApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         load_system_mono_font(&cc.egui_ctx);
+
+        // Theme: start from the config-adjacent `themes/` directory,
+        // fall back to the shipped default when nothing is usable there.
+        let theme_entries = crate::palette::discover(&themes_dir());
+
+        let (palette, theme_index, theme_error) = match theme_entries.first() {
+            Some(entry) => match entry.load() {
+                Ok(t) => {
+                    crate::palette::apply_visuals(&cc.egui_ctx, &t);
+                    let p = crate::palette::Palette::new(t);
+                    crate::palette::set_active(&cc.egui_ctx, p.clone());
+                    (p, 0usize, None)
+                }
+                Err(e) => {
+                    // A broken theme file must not brick the app; fall
+                    // back to the shipped default. See UI-REQS.md 1.5.
+                    let fallback = mist_core::theme::builtin("wyldware")
+                        .expect("wyldware builtin must always parse");
+                    crate::palette::apply_visuals(&cc.egui_ctx, &fallback);
+                    let p = crate::palette::Palette::new(fallback);
+                    crate::palette::set_active(&cc.egui_ctx, p.clone());
+                    (
+                        p,
+                        0usize,
+                        Some(format!("{}: {e}", entry.label)),
+                    )
+                }
+            },
+            None => {
+                let t = mist_core::theme::builtin("wyldware")
+                    .expect("wyldware builtin must always parse");
+                crate::palette::apply_visuals(&cc.egui_ctx, &t);
+                let p = crate::palette::Palette::new(t);
+                crate::palette::set_active(&cc.egui_ctx, p.clone());
+                (p, 0usize, None)
+            }
+        };
+
         let runtime = RuntimeHandle::spawn();
         let me = Self {
             tabs: Vec::new(),
@@ -84,6 +149,11 @@ impl MistApp {
             runtime,
             incoming: Arc::new(Mutex::new(HashMap::new())),
             images: crate::images::ImageCache::new(),
+            palette,
+            theme_entries,
+            theme_index,
+            show_theme_picker: false,
+            theme_error,
             connect_pending: false,
             connect_error: None,
         };
@@ -92,6 +162,95 @@ impl MistApp {
         let focus_id = eframe::egui::Id::new("mist-connect-host");
         cc.egui_ctx.memory_mut(|m| m.request_focus(focus_id));
         me
+    }
+
+    /// Switch to the theme at `index`. A load failure keeps the current
+    /// theme and records the error for the picker to display.
+    fn select_theme(&mut self, index: usize, ctx: &eframe::egui::Context) {
+        let Some(entry) = self.theme_entries.get(index) else {
+            return;
+        };
+        match entry.load() {
+            Ok(t) => {
+                crate::palette::apply_visuals(ctx, &t);
+                let p = crate::palette::Palette::new(t);
+                crate::palette::set_active(ctx, p.clone());
+                self.palette = p;
+                self.theme_index = index;
+                self.theme_error = None;
+            }
+            Err(e) => {
+                self.theme_error = Some(format!("{}: {e}", entry.label));
+            }
+        }
+    }
+
+    /// Re-scan the themes directory. Called when the picker opens so a
+    /// file dropped in while the app was running shows up.
+    fn refresh_themes(&mut self) {
+        self.theme_entries = crate::palette::discover(&themes_dir());
+        if self.theme_index >= self.theme_entries.len() {
+            self.theme_index = 0;
+        }
+    }
+
+    /// The theme picker. Deliberately a separate window rather than a
+    /// dropdown: the swatches are the point, and a dropdown hides them.
+    fn open_theme_picker(&mut self, ctx: &eframe::egui::Context) {
+        let mut chosen: Option<usize> = None;
+        let mut close = false;
+
+        eframe::egui::Window::new("Theme")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                if let Some(err) = &self.theme_error {
+                    ui.colored_label(self.palette.error(), format!("{err}"));
+                    ui.separator();
+                }
+
+                // Built-ins first, then file-backed themes, so the user can
+                // tell which is which without reading paths.
+                let mut last_builtin: Option<bool> = None;
+                for (i, entry) in self.theme_entries.iter().enumerate() {
+                    let is_builtin = entry.is_builtin();
+                    if last_builtin != Some(is_builtin) {
+                        ui.separator();
+                        ui.label(if is_builtin { "Built-in" } else { "From file" });
+                        last_builtin = Some(is_builtin);
+                    }
+
+                    ui.horizontal(|ui| {
+                        let selected = i == self.theme_index;
+                        let label = if selected {
+                            format!("\u{2713} {}", entry.label)
+                        } else {
+                            format!("    {}", entry.label)
+                        };
+                        if ui.selectable_label(selected, label).clicked() {
+                            chosen = Some(i);
+                            close = true;
+                        }
+                    });
+                }
+
+                ui.separator();
+                ui.label(format!(
+                    "{} of {}",
+                    self.palette.theme.name,
+                    self.theme_entries.len()
+                ));
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if let Some(i) = chosen {
+            self.select_theme(i, ctx);
+        }
+        if close {
+            self.show_theme_picker = false;
+        }
     }
 
     fn drain_incoming(&mut self) {
@@ -297,12 +456,14 @@ fn monospace_font(ui: &eframe::egui::Ui) -> eframe::egui::FontId {
     }
 }
 
+/// Default text colour, from the active theme rather than egui's defaults.
 fn default_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
-    ui.style().visuals.text_color()
+    crate::palette::active(ui.ctx()).text()
 }
 
+/// De-emphasised text, from the active theme.
 fn weak_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
-    ui.style().visuals.weak_text_color()
+    crate::palette::active(ui.ctx()).dim()
 }
 
 fn make_fmt(ui: &eframe::egui::Ui, color: eframe::egui::Color32) -> eframe::egui::TextFormat {
@@ -436,7 +597,7 @@ fn build_job(node: &Node, job: &mut eframe::egui::text::LayoutJob, ui: &eframe::
                     _ => String::new(),
                 })
                 .collect();
-            let link_color = ui.style().visuals.hyperlink_color;
+            let link_color = crate::palette::active(ui.ctx()).accent();
             let fmt = make_underline_fmt(ui, link_color);
             emit(job, &text, fmt);
         }
@@ -542,6 +703,11 @@ impl eframe::App for MistApp {
                         tab.push_line(RenderedLine::from_text("[TODO] preferences"));
                     }
                 }
+                if ui.button("Theme").clicked() {
+                    self.refresh_themes();
+                    self.show_theme_picker = !self.show_theme_picker;
+                }
+                ui.label(format!("[{}]", self.palette.theme.name));
                 if let Some(tab) = self.tabs.get(self.active) {
                     if tab.connected && ui.button("Disconnect").clicked() {
                         self.runtime.request(DriverRequest::Disconnect { tab_id: tab.id });
@@ -724,5 +890,9 @@ impl eframe::App for MistApp {
         if connect_pending {
             self.open_connect(ctx);
         }
+        if self.show_theme_picker {
+            self.open_theme_picker(ctx);
+        }
     }
+
 }

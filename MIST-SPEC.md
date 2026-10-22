@@ -1,10 +1,15 @@
 # Mist — Design Specification
 
-This is the working design spec for Mist. Sections 1–4 below define
-the **sharp** half of the spec — the parts we cut code against every
-day. Sections 5–12 are forward-looking (composability, security,
-migration story). When in doubt, prefer the line that says **"sharp"**
-over the line that says **"future"** — sharp wins.
+*MUD Interchange Style Template.*
+
+Mist is a *style template* for MUD output. The design premise is that
+the client supplies the frame — a theming layer, a layout engine, a
+scripting runtime — and the world supplies content. Neither dictates
+the other. Sections 1–4 below define the **sharp** half of the spec —
+the parts we cut code against every day. Sections 5–12 are
+forward-looking (composability, security, migration story). When in
+doubt, prefer the line that says **"sharp"** over the line that says
+**"future"** — sharp wins.
 
 The document is per-area authoritative: if code disagrees with this
 spec, **the spec is right** and the code is wrong. Update this file

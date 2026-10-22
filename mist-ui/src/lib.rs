@@ -6,6 +6,7 @@
 pub mod app;
 pub mod connect;
 pub mod images;
+pub mod palette;
 pub mod session;
 
 pub use app::MistApp;
