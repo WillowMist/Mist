@@ -1,0 +1,26 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Cargo lock is checked in for binaries; uncomment the line below if
+# this crate ever becomes a library-only project.
+# Cargo.lock
+
+# IDE / editor noise
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Pueblo/UE 2.61 source archive — read-only reference, never modified
+# in tree. Re-extract on demand from the SF.net CVS dump or a vendor
+# archive.
+pueblosrc261.zip
+
+# Unpacked Pueblo 2.61 source tree. Same rule: read-only reference for
+# understanding historical behaviour. Never modify in place.
+extracted/

@@ -1,0 +1,19 @@
+[package]
+name = "mist-ui"
+version = "0.2.0"
+edition = "2021"
+description = "Mist UI — egui application shell"
+
+[dependencies]
+mist-core = { path = "../mist-core" }
+mist-render = { path = "../mist-render" }
+eframe = { version = "0.30", default-features = false, features = ["wayland", "x11", "wgpu"] }
+egui = "0.30"
+cosmic-text = "0.13"
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+base64 = "0.22"

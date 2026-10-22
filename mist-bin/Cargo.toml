@@ -1,0 +1,16 @@
+[package]
+name = "mist"
+version = "0.2.0"
+edition = "2021"
+description = "Mist — MUD client. A from-scratch rewrite of Pueblo/UE."
+license = "MIT"
+homepage = "https://github.com/your-org/mist"
+
+[dependencies]
+mist-core = { path = "../mist-core" }
+mist-render = { path = "../mist-render" }
+mist-ui = { path = "../mist-ui" }
+eframe = { version = "0.30", default-features = false, features = ["wayland", "x11", "wgpu"] }
+egui = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

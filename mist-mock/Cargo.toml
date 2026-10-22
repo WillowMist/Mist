@@ -1,0 +1,8 @@
+[package]
+name = "mist-mock"
+version = "0.2.0"
+edition = "2021"
+description = "Mist mock — tiny localhost telnet-style mock MUD for development"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
