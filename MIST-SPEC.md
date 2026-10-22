@@ -352,10 +352,8 @@ single flat directory per app, and the crate ignores `qualifier` and
 
 Rejected alternatives, for the record:
 
-- **`com.dragonpro`** — nobody ever understood what the "Pro" was for.
-  Not a brand worth putting on a user's disk.
-- **`net.legendsgames`** — reserved for the Cortex virtual tabletop,
-  which is a separate product with a separate audience.
+- **A publisher-less namespace** (`mist.client`) — correct, but leaves
+  nothing on disk for sibling Wyldware tooling to group under.
 - **`wyldware-mist` as the application name** — tested and reverted. It
   put `wyldware` on the Linux path at the cost of a nonsense folder name
   on macOS and Windows.

@@ -98,8 +98,7 @@ lives at `extracted/LICENSE.html` once extracted.
 ## Publisher and config namespace
 
 Mist is a **Wyldware** product. `wyldware.com` has been hosting MUDs
-since the mid-90s; the Cortex virtual tabletop is a separate Wyldware
-lineage under `net.legendsgames`.
+since the mid-90s.
 
 Persistent state lives in the platform-idiomatic location for the
 `com.wyldware` / `Wyldware` / `mist` application triple:

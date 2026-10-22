@@ -71,8 +71,7 @@ pub fn config_path() -> Result<PathBuf> {
     //
     // Wyldware is the publisher of record for Mist and its sibling MUD
     // tooling; the Flatpak build carries the application ID
-    // `com.wyldware.mist`. The Cortex virtual tabletop is a separate
-    // product and will use `net.legendsgames` when it ships.
+    // `com.wyldware.mist`.
     let dirs = directories::ProjectDirs::from("com.wyldware", "Wyldware", "mist")
         .ok_or_else(|| PuebloError::Profile("no platform config dir".into()))?;
     Ok(dirs.config_dir().join("config.toml"))
