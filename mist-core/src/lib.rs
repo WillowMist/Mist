@@ -8,6 +8,7 @@ pub mod error;
 pub mod markup;
 pub mod profile;
 pub mod telnet;
+pub mod theme;
 pub mod tintin;
 
 pub use error::PuebloError;
