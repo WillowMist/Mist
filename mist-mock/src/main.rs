@@ -78,9 +78,11 @@ async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Res
     // A client that answers is treated as ANSI-capable; one that stays
     // silent gets the banner with colour codes stripped.
     //
-    // This is the exchange Mist was missing, which is why a real MUSH
-    // rendered without colour.
-    stream.write_all(&[IAC, SB, TERMINAL_TYPE, SEND, IAC, SE]).await?;
+    // Skipped in plain mode because plain mode is a pure-echo path
+    // with no ANSI handling of its own, and the negotiation's bytes
+    // would leak into the input stream otherwise.
+    if mode == "pueblo" {
+        stream.write_all(&[IAC, SB, TERMINAL_TYPE, SEND, IAC, SE]).await?;
     let mut ansi_ok = false;
     let mut ident_buf = [0u8; 64];
     {
@@ -107,6 +109,7 @@ async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Res
     }
     if !ansi_ok {
         eprintln!("client did not identify; sending colour-free banner");
+        }
     }
 
     if mode == "pueblo" {

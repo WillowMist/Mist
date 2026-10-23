@@ -94,10 +94,11 @@ pub struct Negotiator {
     pub terminal_type: String,
 }
 
-/// Default terminal type we report: a real VT100/xterm name so servers
-/// running a terminfo lookup recognise us, plus the ANSI marker MUSH
-/// servers look for. Fits inside RFC 1091's 24-character limit.
-pub const DEFAULT_TERMINAL_TYPE: &str = "xterm-256color";
+/// Default terminal type we report: `xterm-color` is the canonical "I
+/// support 16-colour ANSI" identifier and is in every MUSH's default
+/// termcap. A user who actually wants 256-colour on a MUSH that
+/// recognises it can override with [`TelnetStream::set_terminal_type`].
+pub const DEFAULT_TERMINAL_TYPE: &str = "xterm-color";
 
 impl Default for Negotiator {
     fn default() -> Self {
