@@ -309,7 +309,33 @@ async fn do_connect(
                 }
                 Ok(n) => {
                     telnet.feed(&buf[..n]);
-                    let _ = telnet.drain_outgoing();
+
+                    // Write back whatever negotiation the state machine produced:
+                    // WILL/DO acknowledgements, the terminal-type reply,
+                    // MCCP acknowledgements. Dropping these on the floor
+                    // means the server never learns who we are, and MUSH
+                    // servers withhold ANSI from a silent client.
+                    //
+                    // The registry lock is held across the write, but these
+                    // are a few bytes and only happen during negotiation,
+                    // so contention with a user's Send is not a concern.
+                    // Nothing on this path re-enters the registry, so there
+                    // is no deadlock.
+                    let replies = telnet.drain_outgoing();
+                    if !replies.is_empty() {
+                        let registry = writers_registry().await;
+                        let mut reg = registry.lock().await;
+                        if let Some(w) = reg.get_mut(&tab_id) {
+                            for reply in replies {
+                                if let Err(e) = w.write_all(&reply).await {
+                                    eprintln!("[tab {tab_id}] write outgoing error: {e}");
+                                    break;
+                                }
+                            }
+                        } else {
+                            eprintln!("[tab {tab_id}] no writer for negotiation reply");
+                        }
+                    }
 
                     for ev in telnet.drain_events() {
                         if let mist_core::telnet::TelnetEvent::Data(d) = ev {

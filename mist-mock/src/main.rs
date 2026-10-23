@@ -37,6 +37,10 @@ const DO: u8 = 253;
 const ECHO: u8 = 1;
 const TERMINAL_TYPE: u8 = 24;
 const EOR: u8 = 25;
+const SB: u8 = 250;
+const SE: u8 = 240;
+const IS: u8 = 0;
+const SEND: u8 = 1;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -68,6 +72,42 @@ async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Res
     stream.write_all(&[IAC, WILL, ECHO]).await?;
     stream.write_all(&[IAC, DO, TERMINAL_TYPE]).await?;
     stream.write_all(&[IAC, DO, EOR]).await?;
+
+    // MUSH-style ANSI gating: ask the client to identify itself, the way a
+    // PennMUSH or TinyMUSH does via RFC 1091 `IAC SB TTYPE SEND IAC SE`.
+    // A client that answers is treated as ANSI-capable; one that stays
+    // silent gets the banner with colour codes stripped.
+    //
+    // This is the exchange Mist was missing, which is why a real MUSH
+    // rendered without colour.
+    stream.write_all(&[IAC, SB, TERMINAL_TYPE, SEND, IAC, SE]).await?;
+    let mut ansi_ok = false;
+    let mut ident_buf = [0u8; 64];
+    {
+        use tokio::time::{timeout, Duration};
+        if let Ok(Ok(n)) =
+            timeout(Duration::from_millis(600), stream.read(&mut ident_buf)).await
+        {
+            // A well-behaved reply is IAC SB TTYPE IS <name> IAC SE.
+            if n >= 8
+                && ident_buf[0] == IAC
+                && ident_buf[1] == SB
+                && ident_buf[2] == TERMINAL_TYPE
+                && ident_buf[3] == IS
+            {
+                ansi_ok = true;
+                let name: String = ident_buf[4..n]
+                    .iter()
+                    .take_while(|&&b| b != IAC)
+                    .map(|&b| b as char)
+                    .collect();
+                eprintln!("client terminal type: {name:?} -> ANSI enabled");
+            }
+        }
+    }
+    if !ansi_ok {
+        eprintln!("client did not identify; sending colour-free banner");
+    }
 
     if mode == "pueblo" {
         // Pueblo-mode intro: announce a banner in markup, signal the

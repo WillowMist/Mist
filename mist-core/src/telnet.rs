@@ -40,6 +40,12 @@ pub mod cmd {
     pub const IAC: u8 = 255;
 }
 
+/// Subnegotiation discriminators. TTYPE is the only option where these
+/// are load-bearing: `SEND` means the server is asking for our terminal
+/// type, `IS` means the server is declaring its own.
+pub const IS: u8 = 0;
+pub const SEND: u8 = 1;
+
 /// Telnet option numbers.
 pub mod opt {
     pub const ECHO: u8 = 1;
@@ -77,7 +83,21 @@ pub struct Negotiator {
     pub client_will: u128, // bitset of options we WILL
     pub server_do: u128,   // bitset of options server said DO to
     pub mccp_active: bool,
+    /// What we report in reply to `IAC SB TTYPE SEND`.
+    ///
+    /// RFC 1091 caps this at 24 printable US-ASCII characters. The value is
+    /// configurable because servers gate on it: PennMUSH and TinyMUSH read
+    /// `terminfo()` to decide whether to grant ANSI to the session, so a
+    /// server may expect a specific string. See the `TERMINAL_TYPE`
+    /// constant for the default, and [`TelnetStream::set_terminal_type`] to
+    /// override it per-world.
+    pub terminal_type: String,
 }
+
+/// Default terminal type we report: a real VT100/xterm name so servers
+/// running a terminfo lookup recognise us, plus the ANSI marker MUSH
+/// servers look for. Fits inside RFC 1091's 24-character limit.
+pub const DEFAULT_TERMINAL_TYPE: &str = "xterm-256color";
 
 impl Default for Negotiator {
     fn default() -> Self {
@@ -95,6 +115,7 @@ impl Default for Negotiator {
             client_will: will,
             server_do: 0,
             mccp_active: false,
+            terminal_type: DEFAULT_TERMINAL_TYPE.to_string(),
         }
     }
 }
@@ -182,6 +203,27 @@ impl TelnetStream {
 
     pub fn negotiated(&self) -> &Negotiator {
         &self.negotiated
+    }
+
+    /// Override the terminal type we report in reply to
+    /// `IAC SB TTYPE SEND`. Values are truncated to 24 printable
+    /// US-ASCII characters per RFC 1091.
+    pub fn set_terminal_type(&mut self, tt: &str) {
+        let cleaned: String = tt
+            .chars()
+            .filter(|c| (' '..='~').contains(c))
+            .take(24)
+            .collect();
+        self.negotiated.terminal_type = cleaned;
+    }
+
+    /// Build the `IAC SB TTYPE IS <name> IAC SE` reply. Split out so the
+    /// test suite can assert the exact bytes without a socket.
+    fn terminal_type_reply(&self) -> Vec<u8> {
+        let mut out = vec![cmd::IAC, cmd::SB, opt::TERMINAL_TYPE, IS];
+        out.extend(self.negotiated.terminal_type.bytes());
+        out.extend_from_slice(&[cmd::IAC, cmd::SE]);
+        out
     }
 
     /// Bytes the caller should push back onto the socket.
@@ -345,13 +387,33 @@ impl TelnetStream {
     fn handle_subnegotiation(&mut self, opt_byte: u8) {
         match opt_byte {
             opt::TERMINAL_TYPE => {
-                // First byte is IS/SEND; here we just remember what the server
-                // sent (PUEBLO vs PUEBLO-MXP) so the application can switch.
+                // RFC 1091. Two directions:
+                //
+                //   SB TTYPE SEND   — the server is asking what we are.
+                //                       We must answer with
+                //                       SB TTYPE IS <name> SE. MUSH servers
+                //                       (Penn, Tiny) read this to decide whether
+                //                       to grant ANSI to the session, so
+                //                       staying silent here means no colours.
+                //
+                //   SB TTYPE IS <x>  — the server is telling us its own
+                //                       type. Recorded for the application,
+                //                       which is how we notice a Pueblo
+                //                       ("PUEBLO" / "PUEBLO-MXP") and switch
+                //                       on MWorld markup.
                 let params = std::mem::take(&mut self.sb_buf);
-                self.events.push_back(TelnetEvent::Subnegotiate {
-                    option: opt_byte,
-                    params,
-                });
+                match params.first() {
+                    Some(&SEND) => {
+                        let reply = self.terminal_type_reply();
+                        self.pending_out.push_back(reply);
+                    }
+                    _ => {
+                        self.events.push_back(TelnetEvent::Subnegotiate {
+                            option: opt_byte,
+                            params,
+                        });
+                    }
+                }
             }
             opt::COMPRESS => {
                 // Pueblo receives `IAC SB COMPRESS WILL SE` for v1 and
@@ -443,6 +505,58 @@ mod tests {
             }
             _ => panic!("expected Subnegotiate"),
         }
+    }
+
+    #[test]
+    fn answers_ttype_send_with_our_terminal_type() {
+        // A MUSH server asks who we are; we must answer or it withholds ANSI.
+        let mut s = TelnetStream::new();
+        // IAC SB TTYPE SEND IAC SE
+        s.feed(&[
+            cmd::IAC, cmd::SB, opt::TERMINAL_TYPE, SEND, cmd::IAC, cmd::SE,
+        ]);
+        let out = s.drain_outgoing();
+        let mut expected = vec![cmd::IAC, cmd::SB, opt::TERMINAL_TYPE, IS];
+        expected.extend_from_slice(DEFAULT_TERMINAL_TYPE.as_bytes());
+        expected.extend_from_slice(&[cmd::IAC, cmd::SE]);
+        assert_eq!(
+            out,
+            vec![expected],
+            "must answer TTYPE SEND so MUSH servers grant ANSI"
+        );
+    }
+
+    #[test]
+    fn ttype_reply_is_configurable_and_rfc1091_clamped() {
+        let mut s = TelnetStream::new();
+        // Overlong and non-printable input is clamped.
+        s.set_terminal_type("pueblo-mxp-very-long-name-here");
+        assert_eq!(s.negotiated().terminal_type.len(), 24);
+
+        s.set_terminal_type("PUEBLO-MXP");
+        s.feed(&[cmd::IAC, cmd::SB, opt::TERMINAL_TYPE, SEND, cmd::IAC, cmd::SE]);
+        let out = s.drain_outgoing();
+        let joined: Vec<u8> = out.concat();
+        assert!(
+            joined.windows(9).any(|w| w == b"PUEBLO-MX"),
+            "expected the configured terminal type in the reply, got {joined:?}"
+        );
+    }
+
+    #[test]
+    fn ttype_is_does_not_trigger_a_reply() {
+        // The server declaring its own type is an event, not a prompt.
+        let mut s = TelnetStream::new();
+        s.feed(&[
+            cmd::IAC, cmd::SB, opt::TERMINAL_TYPE, 0, b'x', b't', b'e', b'r', b'm',
+            cmd::IAC, cmd::SE,
+        ]);
+        assert!(s.drain_outgoing().is_empty(), "IS should not be answered");
+        let evs = s.drain_events();
+        assert!(
+            matches!(evs.first(), Some(TelnetEvent::Subnegotiate { option, .. }) if *option == opt::TERMINAL_TYPE),
+            "IS should surface as an event, got {evs:?}"
+        );
     }
 
     #[test]

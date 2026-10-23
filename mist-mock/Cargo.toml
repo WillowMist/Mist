@@ -5,4 +5,4 @@ edition = "2021"
 description = "Mist mock — tiny localhost telnet-style mock MUD for development"
 
 [dependencies]
-tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
