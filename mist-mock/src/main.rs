@@ -34,6 +34,7 @@ use tokio::net::TcpListener;
 const IAC: u8 = 255;
 const WILL: u8 = 251;
 const DO: u8 = 253;
+const WONT: u8 = 252;
 const ECHO: u8 = 1;
 const TERMINAL_TYPE: u8 = 24;
 const EOR: u8 = 25;
@@ -41,6 +42,11 @@ const SB: u8 = 250;
 const SE: u8 = 240;
 const IS: u8 = 0;
 const SEND: u8 = 1;
+const NAWS: u8 = 31;
+const CHARSET: u8 = 44;
+const COMPRESS: u8 = 85;
+const COMPRESS2: u8 = 86;
+const TN3270E: u8 = 34;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -68,49 +74,16 @@ async fn main() -> std::io::Result<()> {
 }
 
 async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Result<()> {
-    // Telnet handshake so the client state machine has something to react to.
+    // Telnet handshake. This is the set wyldware.com actually sends
+    // when a real client connects: WILL ECHO, DO NAWS, WILL CHARSET,
+    // WILL MCCP v1+v2, plus the Pueblo-style TTYPE-equivalent (TN3270E
+    // is the IBM terminal-emulation option; the MUSH uses it as a
+    // "real client" signal, similar to TTYPE). The EOR (option 25) ask
+    // is on the real MUSH too; we keep it for compatibility.
     stream.write_all(&[IAC, WILL, ECHO]).await?;
-    stream.write_all(&[IAC, DO, TERMINAL_TYPE]).await?;
-    stream.write_all(&[IAC, DO, EOR]).await?;
+    stream.write_all(&[IAC, DO, NAWS]).await?;
 
-    // MUSH-style ANSI gating: ask the client to identify itself, the way a
-    // PennMUSH or TinyMUSH does via RFC 1091 `IAC SB TTYPE SEND IAC SE`.
-    // A client that answers is treated as ANSI-capable; one that stays
-    // silent gets the banner with colour codes stripped.
-    //
-    // Skipped in plain mode because plain mode is a pure-echo path
-    // with no ANSI handling of its own, and the negotiation's bytes
-    // would leak into the input stream otherwise.
-    if mode == "pueblo" {
-        stream.write_all(&[IAC, SB, TERMINAL_TYPE, SEND, IAC, SE]).await?;
-    let mut ansi_ok = false;
-    let mut ident_buf = [0u8; 64];
-    {
-        use tokio::time::{timeout, Duration};
-        if let Ok(Ok(n)) =
-            timeout(Duration::from_millis(600), stream.read(&mut ident_buf)).await
-        {
-            // A well-behaved reply is IAC SB TTYPE IS <name> IAC SE.
-            if n >= 8
-                && ident_buf[0] == IAC
-                && ident_buf[1] == SB
-                && ident_buf[2] == TERMINAL_TYPE
-                && ident_buf[3] == IS
-            {
-                ansi_ok = true;
-                let name: String = ident_buf[4..n]
-                    .iter()
-                    .take_while(|&&b| b != IAC)
-                    .map(|&b| b as char)
-                    .collect();
-                eprintln!("client terminal type: {name:?} -> ANSI enabled");
-            }
-        }
-    }
-    if !ansi_ok {
-        eprintln!("client did not identify; sending colour-free banner");
-        }
-    }
+
 
     if mode == "pueblo" {
         // Pueblo-mode intro: announce a banner in markup, signal the
@@ -185,7 +158,7 @@ const PUEBLO_INTRO: &str = "\
 <hr>\r\n\
 \r\n\
 A small stone square sits at the centre of a quiet village. Cobblestones \
-radiate outward under your <font color=\"#ffaa40\">boots</font>. \
+radiate outward under your <font color=\"#ffaa40\">\x1b[38;5;215mboots\x1b[0m</font>. \
 Lanterns flicker against the early-evening air.\r\n\
 \r\n\
 <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAABQCAIAAADnUzvSAAAE6klEQVR42u3TdVfVBxyAcf+fMkd3X7r70t1c8gKX7hZERVEpsVFUFBFEQQzEQBFBFMVtrjtZu81trl/Evr8/fQmcPec8r+A557NOk6gmojXaOhYQrXnAqxoiWku9ANjU8CUzyWi9udF6C2Npg6XJBivJVM/aVM/GTM/GXM/W/GU7CyV7y40OktVGR6tXVNZKTjb6zpKtvoudvqudgau9gZu9gbuDoeThaOjpaOSpMvJSGXk7GUs+zsa+LpKJn6uJv+RmGuBmGuhuGuRuFuRhFuxhFuJpLqm9zEO9JYswH4twydcywtcy0k+yivK3ipYCrGMCrGMDrWODrOOCbOKDlRJCbBMltW2S2i45VCklzD5VCrdPi7BPj3BIj3TIiHTQRDlKmdGOWdGqrBhVdowqJ9ZJyo1zyot30sY7axOc8xOcCxJdpMIkF12Sqy7ZtSjZtTjFTSpJdStNk9zL0t3LpQyPigyPSo3kWZXpWS1ledVke9VKOV51Od71uUoNeT6NktanSevbnK/UUuC3qVCpVefXpvNvK/LfXOTfXhwgbSkJ2FoSuK1UqaMsaHu50o6KoM6K4M7K4J2VwbuqQqTd1SFd1equGnV3jbqnNrSnLrS3LrSvXgrb0xDWLzWG720M39ckRexvjjggtUQc3BR5SGqNPNwaNdCmdGRz9FGpPXqwPebYFqXjW2NObIuVhjpiT3bEndquNLwj/rTUGT/SmXBmp9LoroSx3YnS2a7E8a6k8e6kc91J53uSpYne5MnelMm+lAt9KVN7Uqb6Uy/2p17aK6Vd3pd2RdqfPr0//eoBKWPmYMa1Q0rXD2tuSAOamwOZs0eUbh3Nui0NZs0NZt85lj1/XOnuiZwFaShncSj33kmlpVN596XhvAfD2uXT2uUR7cMR7aMz+dLKaP7j0YLHYwWvjhW8drZQen288Mm47sk53RvndW9KE0VvTRS9PSkVv3Oh+F1pquS9qZL3L0qlH1wq/fCy0kdXyj6Wpss+mS7/9Gr5Z9JMxeczFV9ckyq/vF65ekPpq5tVX0uzVd/MVn97S+m72zXfS3M1P8zVPr1T+3S+9sf52p/u1kk/L9Q9W6h/tlj/y2L9r/capN+WGp4vNT6/3/j7g8Y/pOWmP5eb/nooNf/9qPkfaaXl35UWAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIABDGAAAxjAAAYwgAEMYAADGMAABjCAAQxgAAMYwAAGMIAB/H8FvKohorXUC4CJaC0GYKI13H+S/j1AduYWkgAAAABJRU5ErkJggg==\" alt=\"a generated gradient banner\" width=\"320\">\r\n\
@@ -218,13 +191,36 @@ fn page_break_open() -> &'static str {
     "<xch_page clear=text>"
 }
 
+/// Convert a hex colour to an xterm 256-colour index and emit the SGR
+/// open/close around the supplied text. Used to interleave ANSI colour
+/// codes with the Pueblo markup so terminal clients without their own
+/// HTML renderer still paint in colour.
+fn colorize(hex: &str, text: &str) -> String {
+    let s = hex.trim_start_matches('#');
+    if s.len() != 6 {
+        return text.to_string();
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok();
+    let g = u8::from_str_radix(&s[2..4], 16).ok();
+    let b = u8::from_str_radix(&s[4..6], 16).ok();
+    let (r, g, b) = match (r, g, b) {
+        (Some(r), Some(g), Some(b)) => (r, g, b),
+        _ => return text.to_string(),
+    };
+    let ri = (r as usize * 6) / 256;
+    let gi = (g as usize * 6) / 256;
+    let bi = (b as usize * 6) / 256;
+    let cube = 16 + 36 * ri + 6 * gi + bi;
+    format!("\x1b[38;5;{}m{}\x1b[0m", cube, text)
+}
+
 fn who_page() -> String {
     format!(
         "{open}<b>Players online</b><hr>\r\n\
          \r\n\
-         &nbsp;* <font color=\"#80ff80\">Willow</font> — <i>idle</i> (<a xch_cmd=\"page willow\">page</a>)\r\n\
-         &nbsp;* <font color=\"#80c0ff\">Eve</font> — <i>editing</i> (<a xch_cmd=\"page eve\">page</a>)\r\n\
-         &nbsp;* <font color=\"#ff8080\">Cerin</font> — <i>typing</i> (<a xch_cmd=\"page cerin\">page</a>)\r\n\
+         &nbsp;* <font color=\"#80ff80\">\x1b[38;5;114mWillow\x1b[0m</font> — <i>idle</i> (<a xch_cmd=\"page willow\">page</a>)\r\n\
+         &nbsp;* <font color=\"#80c0ff\">\x1b[38;5;111mEve\x1b[0m</font> — <i>editing</i> (<a xch_cmd=\"page eve\">page</a>)\r\n\
+         &nbsp;* <font color=\"#ff8080\">\x1b[38;5;210mCerin\x1b[0m</font> — <i>typing</i> (<a xch_cmd=\"page cerin\">page</a>)\r\n\
          \r\n\
          <a xch_cmd=\"look\">return to the village square</a>",
         open = page_break_open()
@@ -235,19 +231,19 @@ fn score_block() -> String {
     format!(
         "{open}<b>Character sheet</b><hr>\r\n\
          \r\n\
-         <b>Name:</b>       <font color=\"#ffaa40\">Willow</font>\r\n\
+         <b>Name:</b>       <font color=\"#ffaa40\">\x1b[38;5;215mWillow\x1b[0m</font>\r\n\
          <b>Race:</b>       <i>human</i>\r\n\
-         <b>Class:</b>      <font color=\"#80c0ff\">scout</font>\r\n\
+         <b>Class:</b>      <font color=\"#80c0ff\">\x1b[38;5;111mscout\x1b[0m</font>\r\n\
          \r\n\
-         <b>HP</b>   <font color=\"#ff6060\">42 / 60</font>\r\n\
-         <b>Mana</b> <font color=\"#6080ff\">31 / 50</font>\r\n\
-         <b>Move</b> <font color=\"#80ff80\">120 / 120</font>\r\n\
+         <b>HP</b>   <font color=\"#ff6060\">\x1b[38;5;203m42 / 60\x1b[0m</font>\r\n\
+         <b>Mana</b> <font color=\"#6080ff\">\x1b[38;5;69m31 / 50\x1b[0m</font>\r\n\
+         <b>Move</b> <font color=\"#80ff80\">\x1b[38;5;114m120 / 120\x1b[0m</font>\r\n\
          \r\n\
          <u>Stats</u>\r\n\
-         &nbsp;* STR <font color=\"#ffaa40\">14</font>\r\n\
-         &nbsp;* DEX <font color=\"#80ff80\">16</font>\r\n\
-         &nbsp;* CON <font color=\"#ffaa40\">13</font>\r\n\
-         &nbsp;* INT <font color=\"#80c0ff\">12</font>\r\n\
+         &nbsp;* STR <font color=\"#ffaa40\">\x1b[38;5;215m14\x1b[0m</font>\r\n\
+         &nbsp;* DEX <font color=\"#80ff80\">\x1b[38;5;157m16\x1b[0m</font>\r\n\
+         &nbsp;* CON <font color=\"#ffaa40\">\x1b[38;5;215m13\x1b[0m</font>\r\n\
+         &nbsp;* INT <font color=\"#80c0ff\">\x1b[38;5;153m12\x1b[0m</font>\r\n\
          \r\n\
          <a xch_cmd=\"look\">return to the village square</a>",
         open = page_break_open()
@@ -259,11 +255,11 @@ fn look_target(what: &str) -> String {
     format!(
         "{open}<b>You look closely at the {what}.</b><hr>\r\n\
          \r\n\
-         <font color=\"#c0c0c0\">\
+         <font color=\"#c0c0c0\">\x1b[38;5;145m\
          Whatever it is, it has been here longer than you have. The wind \
          hums through it; nothing moves. You could probably <a xch_cmd=\"examine {what}\">\
          examine it more carefully</a>, but it doesn't seem to lead anywhere.\
-         </font>\r\n\
+         \x1b[0m</font>\r\n\
          \r\n\
          <a xch_cmd=\"look\">return to the village square</a>",
         open = page_break_open()
@@ -281,7 +277,7 @@ fn no_exit(direction: &str) -> String {
 fn say_page(text: &str) -> String {
     format!(
         "{open}\
-         <i><font color=\"#ffd060\">You say, \"{text}\"</font></i>\r\n\
+         <i><font color=\"#ffd060\">\x1b[38;5;222mYou say, \"{text}\"\x1b[0m</font></i>\r\n\
          <a xch_cmd=\"look\">return to the village square</a>",
         open = page_break_open()
     )
@@ -289,7 +285,7 @@ fn say_page(text: &str) -> String {
 
 fn i_didnt_understand(raw: &str) -> String {
     format!(
-        "{open}<font color=\"#ff8080\">I didn't understand that.</font><hr>\r\n\
+        "{open}<font color=\"#ff8080\">\x1b[38;5;217mI didn't understand that.\x1b[0m</font><hr>\r\n\
          You typed: <tt><b>{raw}</b></tt>\r\n\
          Try <a xch_cmd=\"look\">look</a>, <a xch_cmd=\"who\">who</a>, \
          <a xch_cmd=\"score\">score</a>, or <a xch_cmd=\"say hello\">say hello</a>.\r\n\

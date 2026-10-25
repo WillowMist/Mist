@@ -52,9 +52,67 @@ impl Default for Color {
     }
 }
 
+/// A run of text together with the SGR style in force when it was
+/// received.
+///
+/// This is the unit that carries colour from the wire to the painter.
+/// The original Pueblo client tracked SGR state in a `ChAnsiState`
+/// class (`extracted/modules/client/msw/ChWorld/ChWConn.h:146`) and
+/// applied it as it rendered; we do the same, but as explicit data so
+/// the markup layer can merge it with `<font color>` and the painter
+/// doesn't have to re-parse escapes.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StyledText {
+    pub text: String,
+    pub sgr: SgrState,
+}
+
+impl From<&str> for StyledText {
+    fn from(s: &str) -> Self {
+        Self::plain(s)
+    }
+}
+
+impl From<String> for StyledText {
+    fn from(s: String) -> Self {
+        Self::plain(s)
+    }
+}
+
+impl StyledText {
+    pub fn new(text: impl Into<String>, sgr: SgrState) -> Self {
+        Self { text: text.into(), sgr }
+    }
+
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), sgr: SgrState::default() }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// Append another run, merging when the style matches so we don't
+    /// fragment the span list unnecessarily.
+    pub fn push(&mut self, other: StyledText) {
+        if other.text.is_empty() {
+            return;
+        }
+        if self.text.is_empty() {
+            self.sgr = other.sgr;
+        }
+        if self.sgr == other.sgr {
+            self.text.push_str(&other.text);
+        } else {
+            self.text.push_str(&other.text);
+        }
+    }
+}
+
 pub struct AnsiParser {
     state: ParserState,
     sb: String,
+    /// The SGR state currently in force. Emitted with each text run.
+    sgr: SgrState,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,7 +128,68 @@ impl AnsiParser {
         Self {
             state: ParserState::Normal,
             sb: String::new(),
+            sgr: SgrState::default(),
         }
+    }
+
+    /// Feed input and return styled text runs.
+    ///
+    /// Unlike [`AnsiParser::feed`], this keeps the SGR state and attaches
+    /// it to each run of text, so colour survives the trip to the painter.
+    /// Control sequences that aren't SGR are dropped: they are screen
+    /// positioning, which a scrollback renderer doesn't implement.
+    pub fn feed_spans(&mut self, input: &str) -> Vec<StyledText> {
+        let mut out: Vec<StyledText> = Vec::new();
+        let mut text = String::new();
+
+        macro_rules! flush {
+            () => {
+                if !text.is_empty() {
+                    out.push(StyledText::new(std::mem::take(&mut text), self.sgr));
+                }
+            };
+        }
+
+        for c in input.chars() {
+            match self.state {
+                ParserState::Normal => match c as u32 {
+                    0x1B => {
+                        flush!();
+                        self.state = ParserState::Esc;
+                    }
+                    0x07 => {} // BEL — ignore
+                    _ => text.push(c),
+                },
+                ParserState::Esc => match c {
+                    '[' => self.state = ParserState::Csi,
+                    _ => {
+                        // ESC followed by something other than '[' — an
+                        // escape sequence we don't model. Drop it.
+                        self.state = ParserState::Normal;
+                    }
+                },
+                ParserState::Csi => match c {
+                    '0'..='9' | '?' | ';' => self.sb.push(c),
+                    _ => {
+                        let payload = std::mem::take(&mut self.sb);
+                        self.state = ParserState::Normal;
+                        // Only SGR affects the text we keep.
+                        if c == 'm' {
+                            if let Some(AnsiEvent::Sgr(s)) = self.parse_csi(&payload, c) {
+                                self.sgr = s;
+                            }
+                        }
+                    }
+                },
+                ParserState::Osc => {
+                    if c as u32 == 0x07 {
+                        self.state = ParserState::Normal;
+                    }
+                }
+            }
+        }
+        flush!();
+        out
     }
 
     pub fn feed(&mut self, input: &str) -> Result<Vec<AnsiEvent>> {

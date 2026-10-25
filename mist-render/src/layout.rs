@@ -135,7 +135,7 @@ pub(crate) fn layout_node(node: &Node, pane: &mut PaneLayout, wrap_width: f32) {
         Node::Document { children } => {
             for c in children { layout_node(c, pane, wrap_width); }
         }
-        Node::Text(t) => pane.push_text(t, wrap_width),
+        Node::Text(t) => pane.push_text(&t.text, wrap_width),
         Node::Bold(children) => {
             let prev = pane.current_style;
             pane.current_style.bold = true;
@@ -170,7 +170,7 @@ pub(crate) fn layout_node(node: &Node, pane: &mut PaneLayout, wrap_width: f32) {
         }
         Node::Anchor { href, xch_cmd, children } => {
             let text = children.iter().map(|c| match c {
-                Node::Text(t) => t.clone(),
+                Node::Text(t) => t.text.clone(),
                 _ => String::new(),
             }).collect::<String>();
             pane.current_line.runs.push(GlyphRun {

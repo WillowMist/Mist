@@ -474,6 +474,52 @@ fn weak_color(ui: &eframe::egui::Ui) -> eframe::egui::Color32 {
     crate::palette::active(ui.ctx()).dim()
 }
 
+/// Build a text format from an SGR state.
+///
+/// Colour resolution follows the theme's precedence rules
+/// (`UI-REQS.md` section 1.6):
+///
+///   * `ansi-priority` — the world's own palette is used for indexed
+///     colours. Truecolor is always respected.
+///   * `theme-priority` — indexed colours are remapped into the theme's
+///     palette. Truecolor is still respected, because a world that sends
+///     a specific colour means it.
+///
+/// `default` is the colour to use when the SGR specifies none.
+fn fmt_for_sgr(
+    ui: &eframe::egui::Ui,
+    sgr: &mist_core::ansi::SgrState,
+    default: eframe::egui::Color32,
+) -> eframe::egui::TextFormat {
+    use mist_core::ansi::Color as AnsiColor;
+    use mist_core::theme::{Precedence, WorldColour};
+
+    let palette = crate::palette::active(ui.ctx());
+    // Which precedence mode are we in? The world's own setting lives on
+    // the tab; until per-world precedence is wired through, default to
+    // letting the world keep its own palette (ansi-priority), which is
+    // what MUD players expect.
+    let mode = Precedence::AnsiPriority;
+
+    let fg = match sgr.fg {
+        AnsiColor::Default => default,
+        AnsiColor::Indexed(i) => palette.world_colour(mode, WorldColour::Indexed(i as usize)),
+        AnsiColor::Rgb(r, g, b) => palette.world_colour(mode, WorldColour::True(r, g, b)),
+    };
+
+    let mut fmt = make_fmt(ui, fg);
+    if sgr.bold {
+        fmt = make_bold_fmt(ui, fg);
+    }
+    if sgr.italic {
+        fmt.italics = true;
+    }
+    if sgr.underline {
+        fmt.underline = eframe::egui::Stroke::new(1.0, fg);
+    }
+    fmt
+}
+
 fn make_fmt(ui: &eframe::egui::Ui, color: eframe::egui::Color32) -> eframe::egui::TextFormat {
     eframe::egui::TextFormat {
         font_id: monospace_font(ui),
@@ -552,7 +598,10 @@ fn build_job(node: &Node, job: &mut eframe::egui::text::LayoutJob, ui: &eframe::
                 build_job(c, job, ui);
             }
         }
-        Node::Text(t) => emit(job, t, make_fmt(ui, default_color(ui))),
+        Node::Text(t) => {
+            let fmt = fmt_for_sgr(ui, &t.sgr, default_color(ui));
+            emit(job, &t.text, fmt);
+        }
         Node::Bold(children) => {
             let fmt = make_bold_fmt(ui, default_color(ui));
             for c in children {
@@ -601,7 +650,7 @@ fn build_job(node: &Node, job: &mut eframe::egui::text::LayoutJob, ui: &eframe::
             let text: String = children
                 .iter()
                 .map(|c| match c {
-                    Node::Text(t) => t.clone(),
+                    Node::Text(t) => t.text.clone(),
                     _ => String::new(),
                 })
                 .collect();
@@ -627,8 +676,8 @@ fn emit_subtree(
     fmt: &eframe::egui::TextFormat,
 ) {
     if let Node::Text(t) = node {
-        if !t.is_empty() {
-            job.append(t, 0.0, fmt.clone());
+        if !t.text.is_empty() {
+            job.append(&t.text, 0.0, fmt.clone());
         }
         return;
     }

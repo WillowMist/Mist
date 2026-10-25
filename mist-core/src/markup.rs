@@ -15,10 +15,15 @@
 
 use crate::error::{PuebloError, Result};
 
+use crate::ansi::StyledText;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     Document { children: Vec<Node> },
-    Text(String),
+    /// A run of text with the SGR style that was in force when it
+    /// arrived. The style comes from the ANSI layer; markup tags like
+    /// `<font color=...>` layer their own colour on top at paint time.
+    Text(StyledText),
     Bold(Vec<Node>),
     Italic(Vec<Node>),
     Underline(Vec<Node>),
@@ -56,6 +61,13 @@ pub struct Parser {
     /// Bytes consumed so far; useful for error messages.
     pos: usize,
     bytes: Vec<u8>,
+    /// The SGR style in force at each byte offset in `bytes`. Always the
+    /// same length as `bytes`; `styles[i]` is the style of `bytes[i]`.
+    /// Empty for the plain-`parse` path, where every byte is default.
+    styles: Vec<crate::ansi::SgrState>,
+    /// Byte offsets where the style changes, as (offset, style). Used to
+    /// slice a text run into styled pieces.
+    style_runs: Vec<(usize, crate::ansi::SgrState)>,
 }
 
 impl Parser {
@@ -66,8 +78,76 @@ impl Parser {
     pub fn parse(&mut self, input: &str) -> Result<Node> {
         self.bytes = input.as_bytes().to_vec();
         self.pos = 0;
+        self.styles = Vec::new();
+        self.style_runs = Vec::new();
         let children = self.parse_children(None)?;
         Ok(Node::Document { children })
+    }
+
+    /// Parse styled spans.
+    ///
+    /// The markup structure is identical to [`Parser::parse`], but the
+    /// text between tags keeps the SGR style that was in force when it
+    /// arrived from the wire. A run of text that straddles a style
+    /// change is split so each piece carries its own style.
+    pub fn parse_spans(&mut self, spans: &[StyledText]) -> Result<Node> {
+        // Flatten the spans into a byte buffer plus a style-per-byte map.
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut styles: Vec<crate::ansi::SgrState> = Vec::new();
+        let mut style_runs: Vec<(usize, crate::ansi::SgrState)> = Vec::new();
+        for span in spans {
+            if span.text.is_empty() {
+                continue;
+            }
+            let start = bytes.len();
+            bytes.extend_from_slice(span.text.as_bytes());
+            styles.extend(std::iter::repeat(span.sgr).take(span.text.len()));
+            style_runs.push((start, span.sgr));
+        }
+        self.bytes = bytes;
+        self.pos = 0;
+        self.styles = styles;
+        self.style_runs = style_runs;
+        let children = self.parse_children(None)?;
+        Ok(Node::Document { children })
+    }
+
+    /// The style in force at byte offset `at`.
+    fn style_at(&self, at: usize) -> crate::ansi::SgrState {
+        if self.styles.is_empty() {
+            return crate::ansi::SgrState::default();
+        }
+        self.styles
+            .get(at)
+            .copied()
+            .unwrap_or_else(|| self.styles[self.styles.len() - 1])
+    }
+
+    /// Split the byte range `[from, to)` into styled pieces, one per
+    /// style change.
+    fn styled_slice(&self, from: usize, to: usize) -> Vec<StyledText> {
+        if self.styles.is_empty() {
+            let text = String::from_utf8_lossy(&self.bytes[from..to]).to_string();
+            if text.is_empty() {
+                return Vec::new();
+            }
+            return vec![StyledText::plain(text)];
+        }
+        let mut out: Vec<StyledText> = Vec::new();
+        let mut i = from;
+        while i < to {
+            let style = self.style_at(i);
+            let mut j = i + 1;
+            while j < to && self.style_at(j) == style {
+                j += 1;
+            }
+            let text = String::from_utf8_lossy(&self.bytes[i..j]).to_string();
+            if !text.is_empty() {
+                out.push(StyledText::new(text, style));
+            }
+            i = j;
+        }
+        out
     }
 
     fn peek(&self) -> Option<u8> {
@@ -82,7 +162,10 @@ impl Parser {
 
     fn parse_children(&mut self, end: Option<&[u8]>) -> Result<Vec<Node>> {
         let mut out = Vec::new();
-        let mut text = String::new();
+        // Start offset of the text run we're accumulating. The bytes
+        // between here and `self.pos` are plain text, which we slice out
+        // styled once we know where the run ends.
+        let mut text_start = self.pos;
         while let Some(b) = self.peek() {
             if let Some(end_tag) = end {
                 if self.starts_with(end_tag) {
@@ -98,26 +181,33 @@ impl Parser {
                     // text substitution, MUX color codes prepended,
                     // etc.). We don't want these to leak into the user's
                     // scrollback as visible markup junk.
-                    if !text.is_empty() {
-                        out.push(Node::Text(std::mem::take(&mut text)));
-                    }
+                    self.flush_text(&mut out, text_start, self.pos);
+                    text_start = self.pos;
                     let _ = self.consume_close_tag_token();
+                    text_start = self.pos;
                 } else {
-                    if !text.is_empty() {
-                        out.push(Node::Text(std::mem::take(&mut text)));
-                    }
+                    self.flush_text(&mut out, text_start, self.pos);
+                    text_start = self.pos;
                     let node = self.parse_element()?;
                     out.push(node);
+                    text_start = self.pos;
                 }
             } else {
-                text.push(b as char);
                 self.bump();
             }
         }
-        if !text.is_empty() {
-            out.push(Node::Text(text));
-        }
+        self.flush_text(&mut out, text_start, self.pos);
         Ok(out)
+    }
+
+    /// Emit the bytes `[from, to)` as one or more styled text nodes.
+    fn flush_text(&self, out: &mut Vec<Node>, from: usize, to: usize) {
+        if to <= from {
+            return;
+        }
+        for piece in self.styled_slice(from, to) {
+            out.push(Node::Text(piece));
+        }
     }
 
     fn starts_with(&self, needle: &[u8]) -> bool {

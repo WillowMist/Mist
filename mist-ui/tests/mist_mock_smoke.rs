@@ -85,9 +85,27 @@ async fn pueblo_intro_render_smoke() {
     // Try parsing the markup end-to-end via mist_core + mist_ui's
     // first_xch_cmd helper through sending a "who" command and parsing
     // the response.
+    // The handshake exchange takes a moment: the client reads the
+    // server's offers, then sends its WILL/DO + TTYPE reply. The mock
+    // waits up to 600ms for that reply, and the connection has to
+    // settle before the "who" command is recognised as user input
+    // rather than echoed as a TTYPE fragment.
     write.write_all(b"who\r\n").await.unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    // Flush any pending outgoing TTYPE bytes the client generated
+    // from the initial handshake — they sit in pending_out until the
+    // next feed, otherwise the mock reads them as user input.
+    for reply in telnet.drain_outgoing() {
+        let _ = write.write_all(&reply).await;
+    }
+    // Diagnostic: tell us what the test's client has actually buffered.
+    // Diagnostic
+eprintln!("[test] pending_out after 900ms: {} bytes", {
+        let total: usize = telnet.drain_outgoing().iter().map(|v| v.len()).sum();
+        total
+    });
     let mut second_chunk = String::new();
+    let mut second_chunk_bytes = Vec::<u8>::new();
     let mut tmp = vec![0u8; 4096];
     let deadline2 = std::time::Instant::now() + Duration::from_millis(2000);
     while second_chunk.len() < 32_000 {
@@ -96,7 +114,17 @@ async fn pueblo_intro_render_smoke() {
             r = read_fut => {
                 let n = r.unwrap();
                 if n == 0 { break; }
+                second_chunk_bytes.extend_from_slice(&tmp[..n]);
                 telnet.feed(&tmp[..n]);
+                // Drain any telnet-generated replies (the server's
+                // repeated SB TERMINAL_TYPE/TN3270E prompts draw
+                // xterm-color / xterm-256color from the client; if
+                // they aren't flushed here they sit in pending_out
+                // and the mock's reader sees the TTYPE bytes as user
+                // input on the next turn).
+                for reply in telnet.drain_outgoing() {
+                    let _ = write.write_all(&reply).await;
+                }
                 for ev in telnet.drain_events() {
                     if let mist_core::telnet::TelnetEvent::Data(d) = ev {
                         for a in ansi.feed(&String::from_utf8_lossy(&d)).unwrap_or_default() {
@@ -117,6 +145,16 @@ async fn pueblo_intro_render_smoke() {
     assert!(
         second_chunk.contains("Players online"),
         "expected mock to respond to `who` with markup; got {second_chunk:?}"
+    );
+    // The mock always colour-paints its banner. ANSI SGR sequences
+    // must reach the client, even when the client never negotiates
+    // beyond ECHO/NAWS. A real MUSH decides whether to send colour
+    // based on its own termcap, not on the client's TTYPE reply.
+    eprintln!("[smoke] second_chunk_bytes ({}): {:02x?}", second_chunk_bytes.len(), &second_chunk_bytes[..second_chunk_bytes.len().min(200)]);
+    assert!(
+        second_chunk_bytes.windows(2).any(|w| w[0] == 0x1b && w[1] == b'['),
+        "expected ANSI SGR sequences in the mock who-page; first 200 bytes: {:02x?}",
+        &second_chunk_bytes[..second_chunk_bytes.len().min(200)]
     );
 
     // Parse the who-response markup and confirm we find an xch_cmd anchor.

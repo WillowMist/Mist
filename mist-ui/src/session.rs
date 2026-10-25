@@ -12,7 +12,7 @@
 //! This keeps the runtime hot and avoids the `tokio::spawn from non-tokio
 //! thread does nothing` trap.
 
-use mist_core::ansi::{AnsiEvent, AnsiParser};
+use mist_core::ansi::{AnsiParser, StyledText};
 use mist_core::telnet::TelnetStream;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -201,6 +201,31 @@ async fn writers_registry() -> &'static Mutex<HashMap<usize, OwnedWriteHalf>> {
         .await
 }
 
+/// Turn the accumulated styled spans into one rendered line and hand it to
+/// the callback. The plain-text form is kept alongside the markup so
+/// clipboard copy and search still work.
+fn flush_line(
+    pending: &mut Vec<StyledText>,
+    on_line: &mut (impl Fn(RenderedLine) + Send + 'static),
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let spans = std::mem::take(pending);
+    // The plain text is the concatenation of every span.
+    let plain: String = spans.iter().map(|s| s.text.as_str()).collect();
+    // Trim a trailing carriage return.
+    let plain = plain.trim_end_matches('\r').to_string();
+    let mut parser = MarkupParser::new();
+    let rendered = match parser.parse_spans(&spans) {
+        Ok(parsed) if has_markup(&parsed) => {
+            RenderedLine::with_markup(plain, parsed)
+        }
+        _ => RenderedLine::from_text(plain),
+    };
+    on_line(rendered);
+}
+
 /// Returns true if the parsed document contains anything more interesting
 /// than a flat list of `Text` nodes — i.e. style/structure worth rendering.
 fn has_markup(parsed: &Node) -> bool {
@@ -296,15 +321,14 @@ async fn do_connect(
     let mut reader = BufReader::new(read);
 
     let driver = tokio::spawn(async move {
-        let mut pending_line = String::new();
+        let mut on_line = on_line;
+        let mut pending_line: Vec<StyledText> = Vec::new();
         let mut raw = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) => {
-                    if !pending_line.is_empty() {
-                        on_line(RenderedLine::from_text(std::mem::take(&mut pending_line)));
-                    }
+                    flush_line(&mut pending_line, &mut on_line);
                     break;
                 }
                 Ok(n) => {
@@ -343,35 +367,36 @@ async fn do_connect(
                         }
                     }
                     if !raw.is_empty() {
+                        // Decode ANSI into styled spans. The SGR state
+                        // rides along with each run of text, so colour
+                        // survives all the way to the painter instead of
+                        // being stripped at the door.
                         let slice = String::from_utf8_lossy(&raw);
-                        for ev in ansi.feed(&slice).unwrap_or_default() {
-                            match ev {
-                                AnsiEvent::Text(t) => pending_line.push_str(&t),
-                                AnsiEvent::UnknownEscape(_) => {
-                                    pending_line.push('\n');
+                        for span in ansi.feed_spans(&slice) {
+                            if span.text.contains('\n') {
+                                // Split the span at newlines; each piece
+                                // keeps the style it arrived with.
+                                let mut pieces: Vec<StyledText> = Vec::new();
+                                for (idx, part) in span.text.split('\n').enumerate() {
+                                    if idx > 0 {
+                                        pieces.push(StyledText::new("\n", span.sgr));
+                                    }
+                                    if !part.is_empty() {
+                                        pieces.push(StyledText::new(part, span.sgr));
+                                    }
                                 }
-                                _ => {}
+                                for piece in pieces {
+                                    if piece.text == "\n" {
+                                        flush_line(&mut pending_line, &mut on_line);
+                                    } else {
+                                        pending_line.push(piece);
+                                    }
+                                }
+                            } else {
+                                pending_line.push(span);
                             }
                         }
                         raw.clear();
-                        // Flush any complete lines (terminated by \n) from
-                        // pending_line. Keep the tail (after the last \n) for
-                        // the next chunk.
-                        while let Some(idx) = pending_line.find('\n') {
-                            let raw: String = pending_line.drain(..=idx).collect();
-                            // strip trailing \r if present
-                            let line = raw.trim_end_matches('\n').trim_end_matches('\r').to_string();
-                            // Try parsing as Pueblo markup. Lines without any
-                            // tag syntax stay as plain text (much faster path).
-                            let mut parser = MarkupParser::new();
-                            let rendered = match parser.parse(&line) {
-                                Ok(parsed) if has_markup(&parsed) => {
-                                    RenderedLine::with_markup(line, parsed)
-                                }
-                                _ => RenderedLine::from_text(line),
-                            };
-                            on_line(rendered);
-                        }
                     }
                 }
                 Err(e) => {
