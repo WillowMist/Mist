@@ -73,6 +73,36 @@ async fn main() -> std::io::Result<()> {
     }
 }
 
+/// Write bytes to the client, compressing them when the session
+/// negotiated MCCP2.
+///
+/// The compressed stream has to stay open for the life of the session —
+/// a MUSH sends many messages and the client keeps one inflate context
+/// alive — so we use a streaming `Compress` with `Z_SYNC_FLUSH` after
+/// each message. `ZlibEncoder::finish()` would end the stream, which is
+/// only correct for a one-shot capture.
+async fn send_bytes(
+    stream: &mut tokio::net::TcpStream,
+    data: &[u8],
+    compressor: &mut Option<flate2::Compress>,
+) -> std::io::Result<()> {
+    match compressor {
+        Some(z) => {
+            // `Compress::compress` writes into `out` but does not grow
+            // it, so the buffer has to be big enough for the whole
+            // message plus the zlib framing. A sync-flush adds a few
+            // bytes of block overhead, hence the slack.
+            let mut out = vec![0u8; data.len() + 64 * 1024];
+            let before = z.total_out() as usize;
+            z.compress(data, &mut out, flate2::FlushCompress::Sync)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let produced = z.total_out() as usize - before;
+            stream.write_all(&out[..produced]).await
+        }
+        None => stream.write_all(data).await,
+    }
+}
+
 async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Result<()> {
     // Telnet handshake. This is the set wyldware.com actually sends
     // when a real client connects: WILL ECHO, DO NAWS, WILL CHARSET,
@@ -82,19 +112,76 @@ async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Res
     // is on the real MUSH too; we keep it for compatibility.
     stream.write_all(&[IAC, WILL, ECHO]).await?;
     stream.write_all(&[IAC, DO, NAWS]).await?;
+    // Offer MCCP v2. The client answers DO COMPRESS2; if it does, the
+    // rest of the session is zlib-compressed. This is the same dance a
+    // real MUSH performs, and it is the only way to exercise the
+    // client's decompressor.
+    stream.write_all(&[IAC, WILL, COMPRESS2]).await?;
 
+    // Wait briefly for the client to answer DO COMPRESS2 before we
+    // start sending data, so the negotiation completes cleanly.
+    //
+    // The client's reply can arrive split across reads, so we keep a
+    // small buffer of everything we've seen and scan it for the
+    // `IAC DO COMPRESS2` sequence.
+    let mut compress = false;
+    {
+        use tokio::time::{timeout, Duration};
+        // `seen` is a rolling window of the client's bytes; `chunk` is
+        // the scratch buffer we read into. A `Vec` with zero length
+        // would make `read` return 0 bytes every time, so the scratch
+        // buffer has to be a real slice.
+        let mut seen: Vec<u8> = Vec::with_capacity(64);
+        let mut chunk = [0u8; 64];
+        let deadline = Duration::from_millis(800);
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < deadline {
+            let remaining = deadline.saturating_sub(t0.elapsed());
+            match timeout(remaining, stream.read(&mut chunk)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    seen.extend_from_slice(&chunk[..n]);
+                    // Look for IAC DO COMPRESS2 (255 253 86).
+                    if seen.windows(3).any(|w| w == [IAC, DO, COMPRESS2]) {
+                        compress = true;
+                        break;
+                    }
+                    // Keep the tail so a sequence split across two
+                    // reads is still detected.
+                    if seen.len() > 3 {
+                        let start = seen.len() - 3;
+                        seen.drain(..start);
+                    }
+                }
+                Ok(Ok(_)) => {}
+                _ => break,
+            }
+        }
+    }
 
+    if compress {
+        // MCCP v2 start sequence, then everything is compressed.
+        stream.write_all(&[IAC, SB, COMPRESS2, IAC, SE]).await?;
+        eprintln!("client accepted MCCP2; compressing the session");
+    }
+
+    // A streaming compressor for the session. `Compress::new(true)`
+    // selects a zlib stream, which is what MCCP uses.
+    let mut compressor = if compress {
+        Some(flate2::Compress::new(flate2::Compression::default(), true))
+    } else {
+        None
+    };
 
     if mode == "pueblo" {
         // Pueblo-mode intro: announce a banner in markup, signal the
         // Pueblox protocol, and drop a fresh <xch_page>.
         let intro = PUEBLO_INTRO.as_bytes();
-        stream.write_all(intro).await?;
+        send_bytes(&mut stream, intro, &mut compressor).await?;
     } else {
         let banner = b"\x1B[1;36m== Pueblo Mock MUD ==\x1B[0m\r\n\
                        \x1B[33mType anything; we'll echo it back.\x1B[0m\r\n\
                        \x1B[32m> \x1B[0m";
-        stream.write_all(banner).await?;
+        send_bytes(&mut stream, banner, &mut compressor).await?;
     }
 
     let mut buf = [0u8; 1024];
@@ -115,19 +202,28 @@ async fn handle(mut stream: tokio::net::TcpStream, mode: String) -> std::io::Res
                     let cmd = line.trim().to_string();
                     line.clear();
                     if cmd == "quit" {
-                        stream.write_all(b"\x1B[36mGoodbye.\x1B[0m\r\n").await?;
+                        send_bytes(
+                            &mut stream,
+                            b"\x1B[36mGoodbye.\x1B[0m\r\n",
+                            &mut compressor,
+                        )
+                        .await?;
                         stream.shutdown().await?;
                         return Ok(());
                     }
                     if mode == "pueblo" {
                         let response = pueblo_response(&cmd);
-                        stream.write_all(response.as_bytes()).await?;
+                        send_bytes(&mut stream, response.as_bytes(), &mut compressor).await?;
                     } else {
                         let reply = format!(
                             "\x1B[36m< \x1B[0m\x1B[1m{}\x1B[0m\r\n\x1B[32m> \x1B[0m",
                             cmd
                         );
-                        stream.write_all(reply.as_bytes()).await?;
+                        // The reply goes through the same compressor as
+                        // the banner — once the session is compressed,
+                        // every byte after the MCCP start sequence is
+                        // zlib data.
+                        send_bytes(&mut stream, reply.as_bytes(), &mut compressor).await?;
                     }
                 }
                 i += 1;

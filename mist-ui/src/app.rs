@@ -15,10 +15,10 @@ fn load_system_mono_font(ctx: &eframe::egui::Context) -> bool {
     // which matters a lot on MUD banners that use bold heavily.
     const FAMILIES: &[(&str, &str, &str, &str)] = &[
         (
-            "/usr/share/fonts/TTF/DejaVuSansMono",
-            "/usr/share/fonts/TTF/DejaVuSansMono-Bold",
-            "/usr/share/fonts/TTF/DejaVuSansMono-Oblique",
-            "/usr/share/fonts/TTF/DejaVuSansMono-BoldOblique",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono-Oblique.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono-BoldOblique.ttf",
         ),
         (
             "/usr/share/fonts/Adwaita/AdwaitaMono-Regular",
@@ -48,6 +48,9 @@ fn load_system_mono_font(ctx: &eframe::egui::Context) -> bool {
                 fonts.font_data.insert(name.into(), eframe::egui::FontData::from_owned(bytes).into());
             }
         }
+        // Register the regular face first, then the variants. egui
+        // resolves a `FontFamily::Name` by looking it up in the family
+        // list, so the variants have to be listed there too.
         fonts
             .families
             .entry(eframe::egui::FontFamily::Monospace)
@@ -58,6 +61,20 @@ fn load_system_mono_font(ctx: &eframe::egui::Context) -> bool {
             .entry(eframe::egui::FontFamily::Proportional)
             .or_default()
             .insert(0, "mono".into());
+        // Each variant becomes its own family so we can select it with
+        // `FontFamily::Name`.
+        for (family_name, data_name) in [
+            ("mono-bold", "mono-bold"),
+            ("mono-italic", "mono-italic"),
+            ("mono-bold-italic", "mono-bold-italic"),
+        ] {
+            if fonts.font_data.contains_key(data_name) {
+                fonts.families.insert(
+                    eframe::egui::FontFamily::Name(family_name.into()),
+                    vec![data_name.to_string()],
+                );
+            }
+        }
         note_face("mono");
         for (name, path) in [("mono-bold", bold), ("mono-italic", italic), ("mono-bold-italic", bold_italic)] {
             if fonts.font_data.contains_key(name) {

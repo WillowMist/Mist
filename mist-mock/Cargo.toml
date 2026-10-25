@@ -6,3 +6,4 @@ description = "Mist mock — tiny localhost telnet-style mock MUD for developmen
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
+flate2 = "1"

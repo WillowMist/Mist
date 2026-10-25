@@ -284,11 +284,17 @@ impl Parser {
 
     /// Does a tag start at `self.pos`?
     ///
-    /// A `<` only opens a tag if it is followed by a letter (or `/` for a
-    /// closing tag) and there is a matching `>` reasonably close by.
-    /// Anything else is literal text — MUD banners are full of ASCII art
-    /// containing `<`, `>` and `/`, and treating those as tags swallows
-    /// the art.
+    /// A `<` only opens a tag when it is followed by a letter (or `/`
+    /// for a closing tag) and a matching `>` appears later. Anything
+    /// else is literal text.
+    ///
+    /// The letter requirement is what keeps MUD banner art intact:
+    /// ASCII art is full of `<`, `>` and `/`, but almost never `<`
+    /// followed by a letter *and* a closing `>`.
+    ///
+    /// The scan distance has to be generous because a legitimate tag can
+    /// be long — an `<img src="data:image/png;base64,…">` carries
+    /// kilobytes before its `>`.
     fn looks_like_tag(&self) -> bool {
         let Some(&first) = self.bytes.get(self.pos + 1) else {
             return false;
@@ -296,15 +302,17 @@ impl Parser {
         if !(first.is_ascii_alphabetic() || first == b'/') {
             return false;
         }
-        // Look for the closing '>' within a sane distance. A real tag is
-        // short; ASCII art can have very long runs between '<' and '>'.
-        const MAX_TAG_LEN: usize = 64;
-        let end = (self.pos + 2).min(self.bytes.len());
-        let limit = (self.pos + MAX_TAG_LEN).min(self.bytes.len());
-        self.bytes[end..limit]
-            .iter()
-            .position(|&b| b == b'>')
-            .is_some()
+        // Find the closing '>'. A tag can't contain a raw '<' — if we
+        // hit one first, this isn't a tag.
+        let mut i = self.pos + 2;
+        while i < self.bytes.len() {
+            match self.bytes[i] {
+                b'>' => return true,
+                b'<' => return false,
+                _ => i += 1,
+            }
+        }
+        false
     }
 
     fn parse_element(&mut self) -> Result<Node> {

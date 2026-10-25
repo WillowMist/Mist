@@ -279,3 +279,120 @@ fn html_entities_are_decoded() {
         "entity decoding wrong: {text:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MCCP
+// ---------------------------------------------------------------------------
+
+/// A MUSH that negotiates MCCP2 sends `IAC SB COMPRESS2 IAC SE` and then
+/// everything is a zlib stream. The client must answer `DO COMPRESS2`,
+/// switch to decompressing, and hand the decompressed bytes to the rest of
+/// the pipeline.
+#[test]
+fn mccp2_decompresses_the_stream_after_the_start_sequence() {
+    use mist_core::telnet::{cmd, opt, TelnetEvent, TelnetStream};
+
+    // What the MUSH would have sent.
+    let payload = b"\x1b[32mHello, compressed world!\x1b[0m\r\n";
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    use std::io::Write;
+    encoder.write_all(payload).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut telnet = TelnetStream::new();
+
+    // The negotiation: the server offers WILL COMPRESS2, we answer DO.
+    telnet.feed(&[cmd::IAC, cmd::WILL, opt::COMPRESS2]);
+    assert!(
+        telnet.drain_outgoing().contains(&vec![cmd::IAC, cmd::DO, opt::COMPRESS2]),
+        "must accept MCCP2"
+    );
+
+    // The start sequence, then the compressed bytes.
+    telnet.feed(&[cmd::IAC, cmd::SB, opt::COMPRESS2, cmd::IAC, cmd::SE]);
+    assert!(
+        telnet.drain_events().iter().any(|e| matches!(e, TelnetEvent::CompressionBegin)),
+        "compression should be announced"
+    );
+
+    // Now the compressed payload.
+    telnet.feed(&compressed);
+
+    let mut text = String::new();
+    for ev in telnet.drain_events() {
+        if let TelnetEvent::Data(d) = ev {
+            text.push_str(&String::from_utf8_lossy(&d));
+        }
+    }
+    // The payload carries its own ANSI codes; the telnet layer passes
+    // bytes through verbatim. (Stripping them is the UI layer's job.)
+    assert_eq!(
+        text, "\x1b[32mHello, compressed world!\x1b[0m\r\n",
+        "decompressed payload wrong"
+    );
+}
+
+#[test]
+fn mccp2_handles_a_stream_split_across_chunks() {
+    use mist_core::telnet::{cmd, opt, TelnetEvent, TelnetStream};
+
+    let payload = b"line one\r\nline two\r\nline three\r\n";
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    use std::io::Write;
+    encoder.write_all(payload).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut telnet = TelnetStream::new();
+    telnet.feed(&[cmd::IAC, cmd::SB, opt::COMPRESS2, cmd::IAC, cmd::SE]);
+    telnet.drain_events();
+
+    // Feed the compressed stream one byte at a time — the worst case a
+    // real network produces.
+    for byte in compressed.iter() {
+        telnet.feed(&[*byte]);
+    }
+
+    let mut text = String::new();
+    for ev in telnet.drain_events() {
+        if let TelnetEvent::Data(d) = ev {
+            text.push_str(&String::from_utf8_lossy(&d));
+        }
+    }
+    assert_eq!(text, "line one\r\nline two\r\nline three\r\n");
+}
+
+#[test]
+fn mccp2_keeps_bytes_the_decoder_could_not_use_yet() {
+    use mist_core::telnet::{cmd, opt, TelnetEvent, TelnetStream};
+
+    let payload = b"a payload long enough to need several chunks to decode";
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    use std::io::Write;
+    encoder.write_all(payload).unwrap();
+    let compressed = encoder.finish().unwrap();
+
+    let mut telnet = TelnetStream::new();
+    telnet.feed(&[cmd::IAC, cmd::SB, opt::COMPRESS2, cmd::IAC, cmd::SE]);
+    telnet.drain_events();
+
+    // Feed the compressed stream in small chunks. The decoder will
+    // sometimes need more bytes than a chunk provides; those bytes must
+    // be kept for the next chunk rather than dropped.
+    for chunk in compressed.chunks(7) {
+        telnet.feed(chunk);
+    }
+
+    let mut text = String::new();
+    for ev in telnet.drain_events() {
+        if let TelnetEvent::Data(d) = ev {
+            text.push_str(&String::from_utf8_lossy(&d));
+        }
+    }
+    assert_eq!(
+        text, "a payload long enough to need several chunks to decode",
+        "bytes were lost between chunks"
+    );
+}

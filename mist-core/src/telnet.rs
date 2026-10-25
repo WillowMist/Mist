@@ -131,6 +131,9 @@ pub struct TelnetStream {
     events: VecDeque<TelnetEvent>,
     mccp: Option<MccpDecompressor>,
     sb_buf: Vec<u8>,
+    /// Compressed bytes we couldn't decode yet because the decoder
+    /// needed more input.
+    pending_compressed: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -144,49 +147,59 @@ enum ParserState {
     SbIac(u8),
 }
 
+/// MCCP decompressor.
+///
+/// MCCP is zlib (RFC 1950) with a preset dictionary-free stream, started
+/// immediately after the `IAC SB COMPRESS2 IAC SE` sequence. Everything
+/// after that point is compressed until the stream ends.
+///
+/// The original Pueblo client's `ChMCCP` class
+/// (`extracted/modules/client/msw/ChWorld/ChMCCP.cpp`) wraps zlib the
+/// same way; it was contributed to Pueblo by Gavin Lambert of Ultra
+/// Enterprises and is based on Oliver Jowett's implementation.
 struct MccpDecompressor {
     z: Decompress,
+    /// Set once the zlib stream reports `StreamEnd`. A MUSH that
+    /// finishes a compressed stream may send plain bytes again.
+    finished: bool,
 }
 
 impl MccpDecompressor {
-    fn new_v2() -> Self {
-        Self { z: Decompress::new(true) }
+    fn new() -> Self {
+        // `Decompress::new(true)` is a zlib stream (with the 2-byte
+        // header), which is what MCCP uses.
+        Self { z: Decompress::new(true), finished: false }
     }
-    fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), crate::error::PuebloError> {
-        // flate2's low-level `Decompress` doesn't implement `Read`. We use
-        // `Decompress::decompress` with a streaming input/output pair, draining
-        // the decoder until it would block on more input. The scaffold is
-        // intentionally minimal — a real MCCP implementation also needs to
-        // detect Z_STREAM_END.
-        let mut total_in = self.z.total_in();
-        let mut total_out = self.z.total_out();
-        loop {
-            let mut scratch_in = input.get(total_in as usize..).unwrap_or(&[]);
-            let mut scratch_out = vec![0u8; 32 * 1024];
-            let before_in = self.z.total_in();
-            let before_out = self.z.total_out();
-            let res = self.z.decompress(
-                scratch_in,
-                &mut scratch_out,
-                flate2::FlushDecompress::None,
-            );
-            match res {
-                Ok(flate2::Status::Ok) | Ok(flate2::Status::StreamEnd) => {
-                    let produced = (self.z.total_out() - before_out) as usize;
-                    out.extend_from_slice(&scratch_out[..produced]);
-                    total_in = self.z.total_in();
-                    total_out = self.z.total_out();
-                    if matches!(res, Ok(flate2::Status::StreamEnd)) || produced == 0 {
-                        break;
-                    }
-                }
-                Ok(flate2::Status::BufError) => break, // need more bytes
-                Err(e) => return Err(crate::error::PuebloError::Mccp(e.to_string())),
-            }
-            // Update the local input cursor so we don't double-feed bytes.
-            scratch_in = &[];
+
+    /// Feed compressed bytes, appending the decompressed output to
+    /// `out`. Returns the number of input bytes consumed.
+    ///
+    /// `input` is the *new* bytes only — the decoder keeps whatever
+    /// partial state it needs between calls.
+    fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<usize, crate::error::PuebloError> {
+        if self.finished || input.is_empty() {
+            return Ok(0);
         }
-        Ok(())
+        // `decompress` takes the input slice fresh on every call, which
+        // is what a streaming decoder needs: each call hands it only the
+        // new bytes and it keeps the window state internally.
+        //
+        // `FlushDecompress::None` means "no more input right now" — the
+        // decoder emits whatever it can and asks for more next call.
+        let mut scratch = vec![0u8; 64 * 1024];
+        let before_in = self.z.total_in();
+        let before_out = self.z.total_out();
+        let status = self
+            .z
+            .decompress(input, &mut scratch, flate2::FlushDecompress::None)
+            .map_err(|e| crate::error::PuebloError::Mccp(e.to_string()))?;
+        let produced = (self.z.total_out() - before_out) as usize;
+        let consumed = (self.z.total_in() - before_in) as usize;
+        out.extend_from_slice(&scratch[..produced]);
+        if matches!(status, flate2::Status::StreamEnd) {
+            self.finished = true;
+        }
+        Ok(consumed)
     }
 }
 
@@ -199,6 +212,7 @@ impl TelnetStream {
             events: VecDeque::new(),
             mccp: None,
             sb_buf: Vec::new(),
+            pending_compressed: Vec::new(),
         }
     }
 
@@ -227,6 +241,15 @@ impl TelnetStream {
         out
     }
 
+    /// Switch the stream into compressed mode. Everything after the
+    /// `IAC SB COMPRESS2 IAC SE` sequence is zlib data until the
+    /// stream ends.
+    fn start_compression(&mut self) {
+        self.mccp = Some(MccpDecompressor::new());
+        self.negotiated.mccp_active = true;
+        self.events.push_back(TelnetEvent::CompressionBegin);
+    }
+
     /// Bytes the caller should push back onto the socket.
     pub fn drain_outgoing(&mut self) -> Vec<Vec<u8>> {
         self.pending_out.drain(..).collect()
@@ -238,22 +261,56 @@ impl TelnetStream {
     }
 
     /// Feed raw socket bytes into the parser.
+    ///
+    /// Bytes are parsed one at a time until the MCCP start sequence
+    /// (`IAC SB COMPRESS2 IAC SE`) completes, at which point the
+    /// remainder of the input is compressed and is routed through the
+    /// decompressor instead of the telnet parser. Decompressed output is
+    /// fed back into the parser, so telnet negotiation *inside* the
+    /// compressed stream still works.
     pub fn feed(&mut self, input: &[u8]) {
-        let mut buf: Vec<u8> = Vec::new();
-        if let Some(z) = self.mccp.as_mut() {
-            // Compressed path: decompress into buf first, then parse the
-            // expanded bytes as if they were the raw stream.
-            if let Err(e) = z.feed(input, &mut buf) {
-                self.events.push_back(TelnetEvent::CompressionEnd);
-                self.events.push_back(TelnetEvent::Data(format!("[MCCP error: {e}]").into_bytes()));
-                self.mccp = None;
-                return;
-            }
-        } else {
-            buf.extend_from_slice(input);
-        }
+        // Any compressed bytes we couldn't decode last time go in front
+        // of this chunk: the decoder needs them to make progress.
+        let mut owned: Vec<u8> = Vec::with_capacity(self.pending_compressed.len() + input.len());
+        owned.append(&mut self.pending_compressed);
+        owned.extend_from_slice(input);
+        let input: &[u8] = &owned;
 
-        for &b in buf.iter() {
+        let mut idx = 0;
+        while idx < input.len() {
+            if self.mccp.is_some() {
+                // Compressed region: everything from here on is zlib.
+                let mut out = Vec::new();
+                let consumed = match self.mccp.as_mut().unwrap().feed(&input[idx..], &mut out) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.events.push_back(TelnetEvent::CompressionEnd);
+                        self.events
+                            .push_back(TelnetEvent::Data(format!("[MCCP error: {e}]").into_bytes()));
+                        self.mccp = None;
+                        return;
+                    }
+                };
+                // Feed the decompressed bytes back through the telnet
+                // parser — a MUSH can still negotiate inside the
+                // compressed stream.
+                for &b in out.iter() {
+                    self.consume_byte(b);
+                }
+                idx += consumed;
+                if consumed == 0 {
+                    // The decoder needs more bytes before it can make
+                    // progress. Stash the remainder for the next chunk.
+                    self.pending_compressed.extend_from_slice(&input[idx..]);
+                    return;
+                }
+                continue;
+            }
+
+            // Uncompressed: feed one byte at a time so we notice the
+            // moment the compression-start sequence completes.
+            let b = input[idx];
+            idx += 1;
             self.consume_byte(b);
         }
     }
@@ -417,19 +474,23 @@ impl TelnetStream {
                 }
             }
             opt::COMPRESS => {
-                // Pueblo receives `IAC SB COMPRESS WILL SE` for v1 and
-                // `IAC SB COMPRESS2 IAC SE` for v2.
+                // MCCP version 1: the server sends
+                //   IAC SB COMPRESS WILL IAC SE
+                // and everything after that is zlib-compressed.
+                //
+                // The original Pueblo client distinguishes v1 from v2
+                // here (`extracted/modules/client/msw/ChWorld/ChMCCP.cpp`):
+                // v1 starts on `WILL`, v2 starts on the bare
+                // `IAC SB COMPRESS2 IAC SE`.
                 if self.sb_buf.first() == Some(&cmd::WILL) {
-                    self.mccp = Some(MccpDecompressor::new_v2());
-                    self.negotiated.mccp_active = true;
-                    self.events.push_back(TelnetEvent::CompressionBegin);
+                    self.start_compression();
                 }
                 self.sb_buf.clear();
             }
             opt::COMPRESS2 => {
-                self.mccp = Some(MccpDecompressor::new_v2());
-                self.negotiated.mccp_active = true;
-                self.events.push_back(TelnetEvent::CompressionBegin);
+                // MCCP version 2: the server sends
+                //   IAC SB COMPRESS2 IAC SE
+                self.start_compression();
                 self.sb_buf.clear();
             }
             opt::NAWS => {

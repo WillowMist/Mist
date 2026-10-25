@@ -105,7 +105,11 @@ eprintln!("[test] pending_out after 900ms: {} bytes", {
         total
     });
     let mut second_chunk = String::new();
-    let mut second_chunk_bytes = Vec::<u8>::new();
+    // The raw telnet payload (decompressed by the telnet layer, but
+    // still carrying its ANSI SGR sequences). We check the SGR bytes
+    // here rather than on the socket bytes: once the session negotiates
+    // MCCP2, the wire bytes are zlib data.
+    let mut telnet_payload = Vec::<u8>::new();
     let mut tmp = vec![0u8; 4096];
     let deadline2 = std::time::Instant::now() + Duration::from_millis(2000);
     while second_chunk.len() < 32_000 {
@@ -114,7 +118,6 @@ eprintln!("[test] pending_out after 900ms: {} bytes", {
             r = read_fut => {
                 let n = r.unwrap();
                 if n == 0 { break; }
-                second_chunk_bytes.extend_from_slice(&tmp[..n]);
                 telnet.feed(&tmp[..n]);
                 // Drain any telnet-generated replies (the server's
                 // repeated SB TERMINAL_TYPE/TN3270E prompts draw
@@ -127,6 +130,7 @@ eprintln!("[test] pending_out after 900ms: {} bytes", {
                 }
                 for ev in telnet.drain_events() {
                     if let mist_core::telnet::TelnetEvent::Data(d) = ev {
+                        telnet_payload.extend_from_slice(&d);
                         for a in ansi.feed(&String::from_utf8_lossy(&d)).unwrap_or_default() {
                             if let AnsiEvent::Text(t) = a {
                                 second_chunk.push_str(&t);
@@ -150,11 +154,10 @@ eprintln!("[test] pending_out after 900ms: {} bytes", {
     // must reach the client, even when the client never negotiates
     // beyond ECHO/NAWS. A real MUSH decides whether to send colour
     // based on its own termcap, not on the client's TTYPE reply.
-    eprintln!("[smoke] second_chunk_bytes ({}): {:02x?}", second_chunk_bytes.len(), &second_chunk_bytes[..second_chunk_bytes.len().min(200)]);
     assert!(
-        second_chunk_bytes.windows(2).any(|w| w[0] == 0x1b && w[1] == b'['),
+        telnet_payload.windows(2).any(|w| w[0] == 0x1b && w[1] == b'['),
         "expected ANSI SGR sequences in the mock who-page; first 200 bytes: {:02x?}",
-        &second_chunk_bytes[..second_chunk_bytes.len().min(200)]
+        &telnet_payload[..telnet_payload.len().min(200)]
     );
 
     // Parse the who-response markup and confirm we find an xch_cmd anchor.
