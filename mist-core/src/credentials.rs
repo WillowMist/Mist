@@ -94,11 +94,23 @@ pub fn reveal(obscured: &str) -> Result<String> {
 
 /// Is an OS keyring reachable on this machine?
 ///
-/// This probes the keyring rather than assuming. On Linux it asks the
-/// Secret Service; on macOS and Windows the native store is always
-/// present, so those report `true` without a round trip.
+/// This probes the keyring rather than assuming. Constructing an
+/// `Entry` only builds a handle — it never contacts the service — so
+/// the probe actually writes a throwaway credential and removes it
+/// again. A write is the only operation that proves the service is
+/// both reachable and writable.
 pub fn keyring_available() -> bool {
-    keyring::Entry::new(KEYRING_SERVICE, "probe").is_ok()
+    let probe = "mist-keyring-probe";
+    let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, probe) else {
+        return false;
+    };
+    if entry.set_password(probe).is_err() {
+        return false;
+    }
+    // Clean up after ourselves. A leftover probe entry would be litter
+    // in the user's keyring.
+    let _ = entry.delete_credential();
+    true
 }
 
 /// Store `password` for `world`/`login`, preferring the OS keyring and
