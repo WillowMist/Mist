@@ -9,51 +9,114 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
 fn load_system_mono_font(ctx: &eframe::egui::Context) -> bool {
-    let candidates = [
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/Adwaita/AdwaitaMono-Regular.ttf",
+    // Load the regular, bold, italic and bold-italic faces of a
+    // monospace family when they're available. SGR bold then picks the
+    // real bold face instead of being faked with a background tint,
+    // which matters a lot on MUD banners that use bold heavily.
+    const FAMILIES: &[(&str, &str, &str, &str)] = &[
+        (
+            "/usr/share/fonts/TTF/DejaVuSansMono",
+            "/usr/share/fonts/TTF/DejaVuSansMono-Bold",
+            "/usr/share/fonts/TTF/DejaVuSansMono-Oblique",
+            "/usr/share/fonts/TTF/DejaVuSansMono-BoldOblique",
+        ),
+        (
+            "/usr/share/fonts/Adwaita/AdwaitaMono-Regular",
+            "/usr/share/fonts/Adwaita/AdwaitaMono-Bold",
+            "/usr/share/fonts/Adwaita/AdwaitaMono-Italic",
+            "/usr/share/fonts/Adwaita/AdwaitaMono-BoldItalic",
+        ),
+    ];
+    const FALLBACKS: &[&str] = &[
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
     ];
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            let mut fonts = eframe::egui::FontDefinitions::default();
-            fonts.font_data.insert(
-                "mono".into(),
-                eframe::egui::FontData::from_owned(bytes).into(),
-            );
-            fonts
-                .families
-                .entry(eframe::egui::FontFamily::Monospace)
-                .or_default()
-                .insert(0, "mono".into());
-            fonts
-                .families
-                .entry(eframe::egui::FontFamily::Proportional)
-                .or_default()
-                .insert(0, "mono".into());
-            ctx.set_fonts(fonts);
-            let mut style = (*ctx.style()).clone();
-            let body_size = style
-                .text_styles
-                .get(&eframe::egui::TextStyle::Body)
-                .map(|s| s.size)
-                .unwrap_or(14.0);
-            let body = eframe::egui::TextStyle::Body.resolve(&style);
-            style.text_styles.insert(
-                eframe::egui::TextStyle::Body,
-                eframe::egui::FontId {
-                    size: body_size * 1.4,
-                    family: body.family,
-                },
-            );
-            ctx.set_style(style);
-            eprintln!("[mist] loaded mono font from {path}");
-            return true;
+
+    let mut fonts = eframe::egui::FontDefinitions::default();
+    let mut loaded = false;
+
+    for (regular, bold, italic, bold_italic) in FAMILIES {
+        let Ok(reg_bytes) = std::fs::read(regular) else { continue };
+        fonts.font_data.insert(
+            "mono".into(),
+            eframe::egui::FontData::from_owned(reg_bytes).into(),
+        );
+        // The bold and italic faces are optional; if they're missing we
+        // fall back to the regular face and fake the weight.
+        for (name, path) in [("mono-bold", bold), ("mono-italic", italic), ("mono-bold-italic", bold_italic)] {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(name.into(), eframe::egui::FontData::from_owned(bytes).into());
+            }
+        }
+        fonts
+            .families
+            .entry(eframe::egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "mono".into());
+        fonts
+            .families
+            .entry(eframe::egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "mono".into());
+        note_face("mono");
+        for (name, path) in [("mono-bold", bold), ("mono-italic", italic), ("mono-bold-italic", bold_italic)] {
+            if fonts.font_data.contains_key(name) {
+                note_face(name);
+            }
+        }
+        loaded = true;
+        break;
+    }
+
+    if !loaded {
+        for path in FALLBACKS {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    "mono".into(),
+                    eframe::egui::FontData::from_owned(bytes).into(),
+                );
+                fonts
+                    .families
+                    .entry(eframe::egui::FontFamily::Monospace)
+                    .or_default()
+                    .insert(0, "mono".into());
+                fonts
+                    .families
+                    .entry(eframe::egui::FontFamily::Proportional)
+                    .or_default()
+                    .insert(0, "mono".into());
+                loaded = true;
+                eprintln!("[mist] loaded mono font from {path}");
+                break;
+            }
         }
     }
-    eprintln!("[mist] no mono font found; using egui defaults");
-    false
+
+    if loaded {
+        ctx.set_fonts(fonts);
+        // Bump the body text size a little; the default is small for a
+        // terminal client.
+        let mut style = (*ctx.style()).clone();
+        let body_size = style
+            .text_styles
+            .get(&eframe::egui::TextStyle::Body)
+            .map(|s| s.size)
+            .unwrap_or(14.0);
+        let body = eframe::egui::TextStyle::Body.resolve(&style);
+        style.text_styles.insert(
+            eframe::egui::TextStyle::Body,
+            eframe::egui::FontId {
+                size: body_size * 1.4,
+                family: body.family,
+            },
+        );
+        ctx.set_style(style);
+        eprintln!("[mist] loaded mono font family");
+        true
+    } else {
+        eprintln!("[mist] no mono font found; using egui defaults");
+        false
+    }
 }
 
 /// The `themes/` directory, next to the config file. Watched for changes
@@ -580,14 +643,49 @@ fn make_fmt(ui: &eframe::egui::Ui, color: eframe::egui::Color32) -> eframe::egui
     }
 }
 
+/// Pick one of the monospace faces we loaded, falling back to the
+/// regular face when the variant wasn't found on disk.
+/// The monospace faces we managed to load from disk. egui's runtime
+/// `Fonts` doesn't expose the family table, so we track it ourselves.
+static LOADED_FACES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn note_face(name: &str) {
+    let set = LOADED_FACES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut s) = set.lock() {
+        s.insert(name.to_string());
+    }
+}
+
+fn face_loaded(name: &str) -> bool {
+    LOADED_FACES
+        .get()
+        .and_then(|s| s.lock().ok())
+        .map(|s| s.contains(name))
+        .unwrap_or(false)
+}
+
+fn mono_face(ui: &eframe::egui::Ui, variant: &str) -> eframe::egui::FontId {
+    let base = monospace_font(ui);
+    if face_loaded(variant) {
+        eframe::egui::FontId {
+            size: base.size,
+            family: eframe::egui::FontFamily::Name(variant.into()),
+        }
+    } else {
+        base
+    }
+}
+
 fn make_bold_fmt(ui: &eframe::egui::Ui, color: eframe::egui::Color32) -> eframe::egui::TextFormat {
-    // The egui 0.30 TextFormat has no `strong` flag. We simulate bold with
-    // a brighter font colour and a subtle background highlight. v0.3 can
-    // pick a true bold variant of the monospace font when one is available.
+    // egui 0.30's TextFormat has no `strong` flag, so we use the real
+    // bold face of the monospace family when we loaded one. Faking bold
+    // with a background tint looked wrong on MUD banners, which use bold
+    // heavily for their ASCII art.
     eframe::egui::TextFormat {
-        font_id: monospace_font(ui),
+        font_id: mono_face(ui, "mono-bold"),
         color,
-        background: eframe::egui::Color32::from_white_alpha(8),
+        background: eframe::egui::Color32::TRANSPARENT,
         italics: false,
         underline: eframe::egui::Stroke::NONE,
         strikethrough: eframe::egui::Stroke::NONE,
@@ -599,7 +697,7 @@ fn make_bold_fmt(ui: &eframe::egui::Ui, color: eframe::egui::Color32) -> eframe:
 
 fn make_italic_fmt(ui: &eframe::egui::Ui, color: eframe::egui::Color32) -> eframe::egui::TextFormat {
     eframe::egui::TextFormat {
-        font_id: monospace_font(ui),
+        font_id: mono_face(ui, "mono-italic"),
         color,
         background: eframe::egui::Color32::TRANSPARENT,
         italics: true,

@@ -34,6 +34,10 @@ use crate::images::CachedImage;
 #[derive(Debug, Clone)]
 pub struct RenderedLine {
     pub text: String,
+    /// The render tree. Always present for lines that came off the
+    /// wire: it carries both the markup structure and the ANSI style of
+    /// each text run. It is `None` only for lines the client generates
+    /// itself (connection notices and the like).
     pub markup: Option<Node>,
     /// First `<a xch_cmd="...">` value found in `markup`, if any.
     pub xch_cmd: Option<String>,
@@ -218,12 +222,38 @@ fn flush_line(
     let plain = plain.trim_end_matches('\r').to_string();
     let mut parser = MarkupParser::new();
     let rendered = match parser.parse_spans(&spans) {
-        Ok(parsed) if has_markup(&parsed) => {
+        // Keep the tree whenever it carries markup structure *or* any
+        // style. A line of pure ANSI has no tags, but it does have
+        // colour, and dropping the tree would drop the colour with it.
+        Ok(parsed) if has_markup(&parsed) || has_style(&parsed) => {
             RenderedLine::with_markup(plain, parsed)
         }
         _ => RenderedLine::from_text(plain),
     };
     on_line(rendered);
+}
+
+/// Returns true if any text run in the tree carries a non-default style.
+fn has_style(parsed: &Node) -> bool {
+    use mist_core::ansi::Color as AnsiColor;
+    match parsed {
+        Node::Text(t) => {
+            t.sgr.fg != AnsiColor::Default
+                || t.sgr.bg != AnsiColor::Default
+                || t.sgr.bold
+                || t.sgr.italic
+                || t.sgr.underline
+                || t.sgr.reverse
+        }
+        Node::Document { children }
+        | Node::Bold(children)
+        | Node::Italic(children)
+        | Node::Underline(children)
+        | Node::MudText(children)
+        | Node::Unknown { children, .. }
+        | Node::Font { children, .. } => children.iter().any(has_style),
+        _ => false,
+    }
 }
 
 /// Returns true if the parsed document contains anything more interesting

@@ -235,6 +235,11 @@ impl Parser {
                 }
             }
             if b == b'<' {
+                if !self.looks_like_tag() {
+                    // Not a tag — literal '<' text.
+                    self.bump();
+                    continue;
+                }
                 if self.starts_with(b"</") {
                     // Orphan closing tag (e.g. `</xch_mudtext>` with no
                     // matching open) — silently consume the entire token
@@ -276,6 +281,31 @@ impl Parser {
         self.bytes[self.pos..].starts_with(needle)
     }
 
+
+    /// Does a tag start at `self.pos`?
+    ///
+    /// A `<` only opens a tag if it is followed by a letter (or `/` for a
+    /// closing tag) and there is a matching `>` reasonably close by.
+    /// Anything else is literal text — MUD banners are full of ASCII art
+    /// containing `<`, `>` and `/`, and treating those as tags swallows
+    /// the art.
+    fn looks_like_tag(&self) -> bool {
+        let Some(&first) = self.bytes.get(self.pos + 1) else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == b'/') {
+            return false;
+        }
+        // Look for the closing '>' within a sane distance. A real tag is
+        // short; ASCII art can have very long runs between '<' and '>'.
+        const MAX_TAG_LEN: usize = 64;
+        let end = (self.pos + 2).min(self.bytes.len());
+        let limit = (self.pos + MAX_TAG_LEN).min(self.bytes.len());
+        self.bytes[end..limit]
+            .iter()
+            .position(|&b| b == b'>')
+            .is_some()
+    }
 
     fn parse_element(&mut self) -> Result<Node> {
         // Consume '<'
