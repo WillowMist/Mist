@@ -32,8 +32,8 @@ required — bare IDs like `claude-haiku-5-5` will fail):
 | Explorer (read)     | `opencode-go/deepseek-v4.1-flash`            |
 | Fixer (code edits)  | `opencode-go/deepseek-v4.1-flash`            |
 | Oracle (escalation)  | `opencode-go/claude-haiku-5-5`               |
-| Designer (UI/UX)    | `opencode-go/gemini-4-argon-contributor`    |
-| Observer / fallback | `opencode-go/minimax-m3.1-flash-free`      |
+| Designer (UI/UX)    | `opencode-go/gemini-4-argon`                 |
+| Observer / fallback | `opencode-go/minimax-m3.1-flash`             |
 | Strong general      | `opencode-go/qwen3.8-max` or `-plus`        |
 
 ### Phantom model (do not use)

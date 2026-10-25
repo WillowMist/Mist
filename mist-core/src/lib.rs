@@ -4,6 +4,8 @@
 //! `core` types where possible) so it can be embedded in any frontend.
 
 pub mod ansi;
+pub mod config;
+pub mod credentials;
 pub mod error;
 pub mod markup;
 pub mod profile;

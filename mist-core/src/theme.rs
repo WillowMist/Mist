@@ -120,6 +120,85 @@ impl Rgba {
 // stay usable from a headless client or a server-side tool.
 
 // ---------------------------------------------------------------------------
+// The world's palette
+// ---------------------------------------------------------------------------
+
+/// The conventional xterm/VGA 16-colour palette, used as the world's own
+/// palette under [`Precedence::AnsiPriority`].
+///
+/// These are the classic xterm values (the ones `xterm` itself ships in
+/// `XTerm-col.ad`/`rgb.txt`), not the Linux console's or Windows
+/// console's variants. A MUD that emits SGR 31 means "the red slot of a
+/// terminal like the one its players use", so the widely-deployed xterm
+/// set is the least surprising choice.
+pub const STANDARD_ANSI: [Rgba; 16] = [
+    Rgba::rgb(0x00, 0x00, 0x00), // 0 black
+    Rgba::rgb(0xcd, 0x00, 0x00), // 1 red
+    Rgba::rgb(0x00, 0xcd, 0x00), // 2 green
+    Rgba::rgb(0xcd, 0xcd, 0x00), // 3 yellow
+    Rgba::rgb(0x00, 0x00, 0xee), // 4 blue
+    Rgba::rgb(0xcd, 0x00, 0xcd), // 5 magenta
+    Rgba::rgb(0x00, 0xcd, 0xcd), // 6 cyan
+    Rgba::rgb(0xe5, 0xe5, 0xe5), // 7 white
+    Rgba::rgb(0x7f, 0x7f, 0x7f), // 8 bright black
+    Rgba::rgb(0xff, 0x00, 0x00), // 9 bright red
+    Rgba::rgb(0x00, 0xff, 0x00), // 10 bright green
+    Rgba::rgb(0xff, 0xff, 0x00), // 11 bright yellow
+    Rgba::rgb(0x5c, 0x5c, 0xff), // 12 bright blue
+    Rgba::rgb(0xff, 0x00, 0xff), // 13 bright magenta
+    Rgba::rgb(0x00, 0xff, 0xff), // 14 bright cyan
+    Rgba::rgb(0xff, 0xff, 0xff), // 15 bright white
+];
+
+/// The standard ANSI slot at `i` (0-15). Out-of-range indices fall back
+/// to the default foreground slot rather than panicking, matching
+/// [`Theme::ansi`].
+pub fn standard_ansi(i: usize) -> Rgba {
+    STANDARD_ANSI.get(i).copied().unwrap_or(STANDARD_ANSI[7])
+}
+
+/// The six levels of the standard xterm 6x6x6 colour cube.
+const CUBE_RAMP: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+/// The standard xterm 256-colour palette: 0-15 are [`STANDARD_ANSI`],
+/// 16-231 are the 6x6x6 cube, 232-255 are the 24-step greyscale ramp.
+pub fn standard_256(n: u8) -> Rgba {
+    match n {
+        0..=15 => standard_ansi(n as usize),
+        16..=231 => {
+            let n = n - 16;
+            let r = CUBE_RAMP[(n / 36) as usize];
+            let g = CUBE_RAMP[((n / 6) % 6) as usize];
+            let b = CUBE_RAMP[(n % 6) as usize];
+            Rgba::rgb(r, g, b)
+        }
+        232..=255 => {
+            let v = 8 + (n as u16 - 232) * 10;
+            Rgba::rgb(v as u8, v as u8, v as u8)
+        }
+    }
+}
+
+/// Squared sRGB distance. Cheap, monotonic with perceptual distance
+/// enough for palette snapping, and avoids pulling in a colour crate.
+fn dist2(a: Rgba, b: Rgba) -> u32 {
+    let d = |x: u8, y: u8| {
+        let d = x as i32 - y as i32;
+        (d * d) as u32
+    };
+    d(a.r, b.r) + d(a.g, b.g) + d(a.b, b.b)
+}
+
+/// The standard 256-colour entry nearest to `c` by squared sRGB
+/// distance. Used by [`Precedence::Strict`] to approximate truecolor
+/// through the theme's 256-colour palette.
+pub fn nearest_standard_256(c: Rgba) -> u8 {
+    (0u16..=255)
+        .min_by_key(|n| dist2(c, standard_256(*n as u8)))
+        .unwrap_or(0) as u8
+}
+
+// ---------------------------------------------------------------------------
 // Native format
 // ---------------------------------------------------------------------------
 
@@ -407,22 +486,64 @@ impl Theme {
     /// Paint a colour the world sent, honouring the theme's precedence
     /// mode.
     ///
-    /// `mode` is [`Precedence::AnsiPriority`] or
-    /// [`Precedence::ThemePriority`]. Truecolor always passes through in
-    /// both — see `UI-REQS.md` §1.6 for the reasoning.
+    /// The modes exist because an *index* is a reference into a palette
+    /// while a truecolor triple is a colour in itself. Only references
+    /// are remapped, except under [`Precedence::Strict`], which forces
+    /// even literal colours through the theme. See `UI-REQS.md` §1.6.
     pub fn paint_world_colour(&self, mode: Precedence, world: WorldColour) -> Rgba {
-        match world {
-            // Indexed: a reference into a palette, so the theme may remap.
-            WorldColour::Indexed(i) => match mode {
-                Precedence::AnsiPriority => self.ansi(i),
-                Precedence::ThemePriority | Precedence::Strict => self.ansi(i),
+        match mode {
+            Precedence::AnsiPriority => match world {
+                // The world's own palette, not the theme's.
+                WorldColour::Indexed(i) => standard_ansi(i),
+                WorldColour::Cube(n) => standard_256(n),
+                WorldColour::True(r, g, b) => Rgba::rgb(r, g, b),
             },
-            WorldColour::Cube(n) => match mode {
-                Precedence::AnsiPriority => self.colour_256(n),
-                Precedence::ThemePriority | Precedence::Strict => self.colour_256(n),
+            Precedence::ThemePriority => match world {
+                WorldColour::Indexed(i) => self.ansi(i),
+                WorldColour::Cube(n) => self.themed_cube(n),
+                WorldColour::True(r, g, b) => Rgba::rgb(r, g, b),
             },
-            // Truecolor: the colour itself, not a reference. Respected.
-            WorldColour::True(r, g, b) => Rgba::rgb(r, g, b),
+            Precedence::Strict => match world {
+                WorldColour::Indexed(i) => self.ansi(i),
+                WorldColour::Cube(n) => self.colour_256(n),
+                WorldColour::True(r, g, b) => {
+                    self.colour_256(nearest_standard_256(Rgba::rgb(r, g, b)))
+                }
+            },
+        }
+    }
+
+    /// Map a 256-colour index onto the theme's own palette.
+    ///
+    /// Indices 0-15 *are* the theme's authored ANSI slots, so they map
+    /// one-to-one. For 16-255 a theme only owns its 16 authored colours;
+    /// the rest of its cube is the standard xterm derivation. So the rule
+    /// is comparative: if one of the theme's 16 colours is nearer to the
+    /// requested cube colour than the nearest *standard* ANSI colour is,
+    /// the theme has expressed a better version of that hue and we use
+    /// it. Otherwise the theme has no opinion about that region and the
+    /// literal cube entry stands.
+    ///
+    /// This lets a theme recolor a coherent subset (e.g. its red at
+    /// `#ff5555` catches cube entries in the red ramp) without mangling
+    /// 256-colour art into sixteen flat slots.
+    fn themed_cube(&self, n: u8) -> Rgba {
+        if n <= 15 {
+            return self.ansi(n as usize);
+        }
+        let literal = standard_256(n);
+        let theme_best = (0..16)
+            .map(|i| self.ansi(i))
+            .min_by_key(|c| dist2(*c, literal))
+            .unwrap_or(literal);
+        let standard_best = (0..16)
+            .map(|i| STANDARD_ANSI[i])
+            .min_by_key(|c| dist2(*c, literal))
+            .unwrap_or(literal);
+        if dist2(theme_best, literal) < dist2(standard_best, literal) {
+            theme_best
+        } else {
+            literal
         }
     }
 }

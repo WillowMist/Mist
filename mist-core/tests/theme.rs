@@ -1,7 +1,8 @@
 //! Tests for the theme model, derivation rules, and importers.
 
 use mist_core::theme::{
-    builtin, load_file, Precedence, Rgba, ThemeFile, ThemeSource, WorldColour,
+    builtin, load_file, nearest_standard_256, standard_256, standard_ansi, Precedence, Rgba,
+    ThemeFile, ThemeSource, WorldColour,
 };
 
 // ---------------------------------------------------------------------------
@@ -184,18 +185,112 @@ fn truecolor_passes_through_in_every_mode() {
     }
 }
 
-#[test]
-fn indexed_colours_use_the_theme_palette() {
+/// A theme whose authored red differs from the standard palette's red,
+/// so the old "always use the theme" bug would be visible.
+fn nonstandard_theme() -> mist_core::theme::Theme {
     let f: ThemeFile = toml::from_str(
         r##"
 [ansi]
-red = "#ff0000"
+red = "#010203"
 "##,
     )
     .unwrap();
-    let t = f.resolve("i", ThemeSource::Builtin("test"));
+    f.resolve("nonstandard", ThemeSource::Builtin("test"))
+}
+
+#[test]
+fn ansi_priority_keeps_the_worlds_own_palette() {
+    let t = nonstandard_theme();
     let painted = t.paint_world_colour(Precedence::AnsiPriority, WorldColour::Indexed(1));
-    assert_eq!(painted, Rgba::rgb(255, 0, 0));
+    assert_eq!(painted, standard_ansi(1), "ansi-priority must use the world's palette");
+    assert_eq!(painted, Rgba::rgb(0xcd, 0x00, 0x00));
+    assert_ne!(painted, t.ansi(1), "the theme's palette must not win");
+}
+
+#[test]
+fn theme_priority_remaps_indexed_into_the_theme_palette() {
+    let t = nonstandard_theme();
+    let painted = t.paint_world_colour(Precedence::ThemePriority, WorldColour::Indexed(1));
+    assert_eq!(painted, t.ansi(1));
+    assert_eq!(painted, Rgba::rgb(0x01, 0x02, 0x03));
+}
+
+#[test]
+fn the_two_modes_disagree_on_the_same_indexed_colour() {
+    let t = nonstandard_theme();
+    let ansi = t.paint_world_colour(Precedence::AnsiPriority, WorldColour::Indexed(1));
+    let themed = t.paint_world_colour(Precedence::ThemePriority, WorldColour::Indexed(1));
+    assert_ne!(ansi, themed, "ansi-priority and theme-priority must be distinguishable");
+}
+
+#[test]
+fn ansi_priority_uses_the_standard_cube_literally() {
+    let t = nonstandard_theme();
+    for n in [0u8, 16, 196, 231, 232, 255] {
+        assert_eq!(
+            t.paint_world_colour(Precedence::AnsiPriority, WorldColour::Cube(n)),
+            standard_256(n),
+            "cube entry {n} should be literal under ansi-priority"
+        );
+    }
+    // Spot-check the standard xterm values.
+    assert_eq!(standard_256(196), Rgba::rgb(255, 0, 0));
+    assert_eq!(standard_256(232), Rgba::rgb(8, 8, 8));
+    assert_eq!(standard_256(255), Rgba::rgb(238, 238, 238));
+}
+
+#[test]
+fn theme_priority_uses_the_theme_for_low_cube_indices() {
+    let t = nonstandard_theme();
+    // 0-15 are the theme's authored ANSI slots.
+    assert_eq!(
+        t.paint_world_colour(Precedence::ThemePriority, WorldColour::Cube(1)),
+        t.ansi(1)
+    );
+}
+
+#[test]
+fn theme_priority_maps_a_cube_colour_to_a_nearer_theme_entry() {
+    let f: ThemeFile = toml::from_str(
+        r##"
+[ansi]
+red = "#ff5555"
+"##,
+    )
+    .unwrap();
+    let t = f.resolve("warm", ThemeSource::Builtin("test"));
+    // Cube 203 is #ff5f5f: the theme's red #ff5555 is much closer than
+    // any standard ANSI slot, so theme-priority substitutes it.
+    assert_eq!(standard_256(203), Rgba::rgb(0xff, 0x5f, 0x5f));
+    let painted = t.paint_world_colour(Precedence::ThemePriority, WorldColour::Cube(203));
+    assert_eq!(painted, Rgba::rgb(0xff, 0x55, 0x55));
+    // Under ansi-priority the same index stays literal.
+    assert_eq!(
+        t.paint_world_colour(Precedence::AnsiPriority, WorldColour::Cube(203)),
+        Rgba::rgb(0xff, 0x5f, 0x5f)
+    );
+}
+
+#[test]
+fn strict_forces_truecolor_through_the_theme_palette() {
+    let t = ThemeFile::default().resolve("s", ThemeSource::Builtin("test"));
+    let literal = Rgba::rgb(0x8a, 0x2b, 0xe2);
+    let painted = t.paint_world_colour(Precedence::Strict, WorldColour::True(0x8a, 0x2b, 0xe2));
+    assert_ne!(painted, literal, "strict must not pass truecolor through");
+    assert_eq!(painted, t.colour_256(nearest_standard_256(literal)));
+}
+
+#[test]
+fn strict_keeps_theme_owned_indices() {
+    let t = nonstandard_theme();
+    assert_eq!(
+        t.paint_world_colour(Precedence::Strict, WorldColour::Indexed(1)),
+        t.ansi(1)
+    );
+    assert_eq!(
+        t.paint_world_colour(Precedence::Strict, WorldColour::Cube(196)),
+        t.colour_256(196)
+    );
 }
 
 // ---------------------------------------------------------------------------

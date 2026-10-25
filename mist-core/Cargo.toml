@@ -13,8 +13,12 @@ tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+base64 = "0.22"
 directories = "5"
 dirs = "5"
+# Keychain (macOS), Credential Manager (Windows), Secret Service (Linux).
+# The crate's default `v1` feature enables the native store for all three.
+keyring = "4"
 rodio = { version = "0.20", optional = true, default-features = false, features = ["wav", "mp3", "vorbis"] }
 midly = { version = "0.5", optional = true }
 
