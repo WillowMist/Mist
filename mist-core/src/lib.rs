@@ -7,6 +7,7 @@ pub mod ansi;
 pub mod config;
 pub mod credentials;
 pub mod error;
+pub mod login;
 pub mod markup;
 pub mod profile;
 pub mod telnet;
