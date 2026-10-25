@@ -46,6 +46,68 @@ pub enum Node {
     Unknown { tag: String, attrs: Vec<(String, String)>, children: Vec<Node> },
 }
 
+/// Decode the HTML entities a MUSH actually emits.
+///
+/// Pueblo's markup is HTML-flavoured, and `&nbsp;` shows up in
+/// list markup constantly (see the mock's "You see:" list). We decode
+/// the handful that matter and leave anything else alone, so a stray
+/// `&` in prose is not mangled.
+fn decode_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find('&') {
+        out.push_str(&rest[..idx]);
+        let tail = &rest[idx..];
+        // An entity is &name; where name is alphanumerics.
+        let end = tail
+            .find(';')
+            .filter(|e| *e <= 12)
+            .unwrap_or(usize::MAX);
+        if end == usize::MAX {
+            out.push('&');
+            rest = &tail[1..];
+            continue;
+        }
+        let name = &tail[1..end];
+        let replacement = match name {
+            "nbsp" => Some('\u{a0}'),
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            // Numeric: &#123; or &#x1F;
+            _ if name.starts_with('#') => {
+                let code = if let Some(hex) = name.strip_prefix("#x").or(name.strip_prefix("#X")) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else if let Some(dec) = name.strip_prefix('#') {
+                    dec.parse::<u32>().ok()
+                } else {
+                    None
+                };
+                code.and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        match replacement {
+            Some(c) => {
+                out.push(c);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                // Not an entity we know; leave it verbatim.
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Tags that the Pueblo render treats as void — they never carry children
 /// even if the markup omits the trailing `/`. Matches HTML's `<br>`/`<hr>`
 /// model: `xch_page`, `xch_mudtext`, `hr`, `br`, `img`, `embed`, `xch_pane`.
@@ -127,7 +189,7 @@ impl Parser {
     /// style change.
     fn styled_slice(&self, from: usize, to: usize) -> Vec<StyledText> {
         if self.styles.is_empty() {
-            let text = String::from_utf8_lossy(&self.bytes[from..to]).to_string();
+            let text = decode_entities(&String::from_utf8_lossy(&self.bytes[from..to]));
             if text.is_empty() {
                 return Vec::new();
             }
@@ -141,7 +203,7 @@ impl Parser {
             while j < to && self.style_at(j) == style {
                 j += 1;
             }
-            let text = String::from_utf8_lossy(&self.bytes[i..j]).to_string();
+            let text = decode_entities(&String::from_utf8_lossy(&self.bytes[i..j]));
             if !text.is_empty() {
                 out.push(StyledText::new(text, style));
             }

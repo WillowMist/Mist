@@ -243,3 +243,39 @@ fn end_to_end_ansi_colour_survives_markup_parsing() {
     let dumped = format!("{doc:?}");
     assert!(dumped.contains("#80ff80"), "markup colour lost: {dumped}");
 }
+
+#[test]
+fn html_entities_are_decoded() {
+    use mist_core::ansi::AnsiParser;
+    use mist_core::markup::Parser;
+
+    let mut ansi = AnsiParser::new();
+    let spans = ansi.feed_spans("&nbsp;* A &amp; B &lt;tag&gt; &#65; &#x42; &unknown;");
+    let mut markup = Parser::new();
+    let doc = markup.parse_spans(&spans).expect("parse");
+
+    // Collect the text.
+    let mut text = String::new();
+    fn walk(n: &mist_core::markup::Node, out: &mut String) {
+        match n {
+            mist_core::markup::Node::Text(t) => out.push_str(&t.text),
+            mist_core::markup::Node::Document { children }
+            | mist_core::markup::Node::Bold(children)
+            | mist_core::markup::Node::Italic(children)
+            | mist_core::markup::Node::Underline(children)
+            | mist_core::markup::Node::MudText(children)
+            | mist_core::markup::Node::Unknown { children, .. }
+            | mist_core::markup::Node::Font { children, .. } => {
+                for c in children { walk(c, out); }
+            }
+            _ => {}
+        }
+    }
+    walk(&doc, &mut text);
+
+    assert_eq!(
+        text,
+        "\u{a0}* A & B <tag> A B &unknown;",
+        "entity decoding wrong: {text:?}"
+    );
+}

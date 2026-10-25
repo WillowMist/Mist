@@ -140,7 +140,17 @@ impl MistApp {
         };
 
         let runtime = RuntimeHandle::spawn();
-        let me = Self {
+
+        // Development convenience: MIST_AUTOCONNECT=host:port connects
+        // at startup without going through the connect dialog. Handy for
+        // scripted smoke tests and for driving the client from a script.
+        let autoconnect = std::env::var("MIST_AUTOCONNECT").ok().and_then(|v| {
+            let (h, p) = v.rsplit_once(':')?;
+            let port: u16 = p.parse().ok()?;
+            Some((h.to_string(), port))
+        });
+
+        let mut me = Self {
             tabs: Vec::new(),
             active: 0,
             next_id: 0,
@@ -161,7 +171,43 @@ impl MistApp {
         // already been opened via `connect_prompt`.
         let focus_id = eframe::egui::Id::new("mist-connect-host");
         cc.egui_ctx.memory_mut(|m| m.request_focus(focus_id));
+
+        if let Some((host, port)) = autoconnect {
+            // Don't show the connect dialog; go straight to the world.
+            me.connect_prompt = None;
+            me.open_tab_for(host, port);
+        }
+
         me
+    }
+
+    /// Open a new tab aimed at `host:port` and start connecting.
+    fn open_tab_for(&mut self, host: String, port: u16) {
+        let incoming = self.incoming.clone();
+        let id = self.next_id;
+        self.next_id += 1;
+        let title = format!("{host}:{port}");
+        self.tabs.push(Tab {
+            id,
+            title,
+            host: host.clone(),
+            port,
+            scrollback: vec![RenderedLine::from_text(format!(
+                "[connecting to {host}:{port}...]"
+            ))],
+            input: String::new(),
+            status: "connecting".into(),
+            connected: false,
+        });
+        self.active = self.tabs.len() - 1;
+        let (tx, _rx) = oneshot::channel();
+        self.runtime.request(DriverRequest::Connect {
+            tab_id: id,
+            host,
+            port,
+            incoming,
+            result: tx,
+        });
     }
 
     /// Switch to the theme at `index`. A load failure keeps the current
